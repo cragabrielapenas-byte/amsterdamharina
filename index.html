@@ -199,13 +199,29 @@ function descargarCsv(nombreArchivo, columnas, filas) {
 }
 
 // ---------------------------------------------------------------------------
-// CONFIGURACIÓN DE SUPABASE (se guarda en localStorage, no hay .env porque
-// no hay paso de build)
+// CONFIGURACIÓN DE SUPABASE
+//
+// Si completás los dos valores de acá abajo, la app se conecta sola y nadie
+// tiene que pegar nada — ni vos, ni quien la abra desde otra compu o
+// celular. Es seguro: la anon key NO es secreta, el control de acceso real
+// lo hace Supabase con las políticas RLS (supabase/policies.sql), no el
+// hecho de que estos datos estén ocultos.
+//
+// Si los dejás vacíos, la app vuelve al modo anterior: pide la URL y la key
+// la primera vez y las guarda en localStorage de ese navegador.
 // ---------------------------------------------------------------------------
+
+const CONFIG_POR_DEFECTO = {
+  url: 'https://fnsfakmtyybytbkqvoom.supabase.co',
+  anonKey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZuc2Zha210eXlieXRia3F2b29tIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODY2NTcyNDAsImV4cCI6MjEwMjIzMzI0MH0.9RyORZ6kp9PgDhWkzwdLO4bFbaUBFGzjj924xloVXww',
+}
 
 const LS_CONFIG_KEY = 'molino_stock_supabase_config'
 
 function obtenerConfigGuardada() {
+  if (CONFIG_POR_DEFECTO.url && CONFIG_POR_DEFECTO.anonKey) {
+    return { url: CONFIG_POR_DEFECTO.url, anonKey: CONFIG_POR_DEFECTO.anonKey }
+  }
   try {
     const raw = localStorage.getItem(LS_CONFIG_KEY)
     return raw ? JSON.parse(raw) : null
@@ -911,9 +927,11 @@ function renderLogin(root) {
         <p class="text-xs text-crust-500 text-center">
           Los usuarios se crean desde el panel de Supabase (Authentication → Users). Ver README.
         </p>
-        <button type="button" id="login-reconfigurar" class="text-xs text-crust-400 hover:underline w-full text-center">
-          Cambiar la conexión a Supabase
-        </button>
+        ${CONFIG_POR_DEFECTO.url && CONFIG_POR_DEFECTO.anonKey ? '' : `
+          <button type="button" id="login-reconfigurar" class="text-xs text-crust-400 hover:underline w-full text-center">
+            Cambiar la conexión a Supabase
+          </button>
+        `}
       </form>
     </div>
   `
@@ -931,7 +949,7 @@ function renderLogin(root) {
       renderApp()
     }
   })
-  qs('#login-reconfigurar', root).addEventListener('click', () => {
+  qs('#login-reconfigurar', root)?.addEventListener('click', () => {
     borrarConfig()
     renderApp()
   })
