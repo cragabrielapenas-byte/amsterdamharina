@@ -1,0 +1,2302 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1" />
+<title>Molino &amp; Stock — Control de harina</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link
+  href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600;700&display=swap"
+  rel="stylesheet"
+/>
+
+<!-- Tailwind (CDN, sin paso de build) -->
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  tailwind.config = {
+    theme: {
+      extend: {
+        colors: {
+          flour: { 50: '#FBFAF6', 100: '#F3F0E6', 200: '#E6E0CC' },
+          crust: { 400: '#8A6F4E', 600: '#5C4630', 800: '#3A2C1E', 900: '#241A11' },
+          wheat: { 400: '#D9B24C', 500: '#C89B3C', 600: '#A87E2A' },
+          sage: { 500: '#6E8B5E', 600: '#557048' },
+          rust: { 500: '#B5563C', 600: '#95412C' },
+        },
+        fontFamily: {
+          display: ['"Fraunces"', 'serif'],
+          body: ['"Inter"', 'sans-serif'],
+        },
+        borderRadius: { sack: '0.375rem' },
+      },
+    },
+  }
+</script>
+
+<!-- Estilos propios, procesados por el mismo Tailwind del CDN -->
+<style type="text/tailwindcss">
+  @layer base {
+    body {
+      @apply bg-flour-50 text-crust-900 font-body antialiased;
+      background-image: radial-gradient(circle at 1px 1px, rgba(58, 44, 30, 0.05) 1px, transparent 0);
+      background-size: 22px 22px;
+    }
+    ::selection { @apply bg-wheat-400/40; }
+  }
+  @layer components {
+    .card { @apply bg-white border border-crust-800/10 rounded-sack shadow-sm; }
+    .btn { @apply inline-flex items-center justify-center gap-2 rounded-sack px-4 py-2.5 text-sm font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed; }
+    .btn-primary { @apply btn bg-crust-800 text-flour-50 hover:bg-crust-900; }
+    .btn-secondary { @apply btn bg-flour-100 text-crust-800 border border-crust-800/15 hover:bg-flour-200; }
+    .btn-danger { @apply btn bg-rust-500 text-white hover:bg-rust-600; }
+    .input { @apply w-full rounded-sack border border-crust-800/20 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-wheat-500/40 focus:border-wheat-500; }
+    .label { @apply block text-xs font-semibold uppercase tracking-wide text-crust-600 mb-1; }
+    .badge { @apply inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-semibold; }
+    .badge-ok { @apply badge bg-sage-500/15 text-sage-600; }
+    .badge-warn { @apply badge bg-wheat-500/20 text-wheat-600; }
+    .badge-danger { @apply badge bg-rust-500/15 text-rust-600; }
+    .badge-neutral { @apply badge bg-crust-800/10 text-crust-600; }
+    .table-clean th { @apply text-left text-xs font-semibold uppercase tracking-wide text-crust-600 pb-2 pr-4; }
+    .table-clean td { @apply py-3 pr-4 border-t border-crust-800/10 text-sm; }
+  }
+  @layer utilities {
+    @media print {
+      .no-imprimir { display: none !important; }
+      .card { box-shadow: none !important; border: 1px solid #ddd !important; break-inside: avoid; }
+      main { width: 100% !important; }
+    }
+  }
+</style>
+
+<!-- Librerías por CDN -->
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+</head>
+<body>
+  <div id="app"></div>
+  <script>
+/* ==========================================================================
+   MOLINO & STOCK — app.js
+   Vanilla JS + Supabase (CDN). Sin build, sin framework: se abre el HTML
+   directo o se sirve como archivo estático (GitHub Pages, Netlify, etc).
+   ========================================================================== */
+
+// ---------------------------------------------------------------------------
+// UTILIDADES GENERALES
+// ---------------------------------------------------------------------------
+
+function qs(sel, root) { return (root || document).querySelector(sel) }
+function qsa(sel, root) { return Array.from((root || document).querySelectorAll(sel)) }
+function escapeHtml(str) {
+  if (str === null || str === undefined) return ''
+  return String(str)
+    .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;').replaceAll("'", '&#39;')
+}
+function fmtKg(n) { return `${Number(n || 0).toFixed(0)} kg` }
+function fmtKg1(n) { return `${Number(n || 0).toFixed(1)} kg` }
+function fmtMoney(n) { return n === null || n === undefined ? '—' : `$${Number(n).toFixed(0)}` }
+function redondear(valor, decimales) {
+  const factor = 10 ** (decimales ?? 1)
+  return Math.round((valor + Number.EPSILON) * factor) / factor
+}
+function hoyISO() { return new Date().toISOString().slice(0, 10) }
+function fechaCorta(iso) {
+  if (!iso) return '—'
+  const [y, m, d] = iso.split('-')
+  return `${d}/${m}/${y}`
+}
+function addDays(iso, dias) {
+  const d = new Date(iso + 'T00:00:00')
+  d.setDate(d.getDate() + dias)
+  return d.toISOString().slice(0, 10)
+}
+function startOfMonth(d) { return new Date(d.getFullYear(), d.getMonth(), 1).toISOString().slice(0, 10) }
+function endOfMonth(d) { return new Date(d.getFullYear(), d.getMonth() + 1, 0).toISOString().slice(0, 10) }
+
+function calcularRango(preset) {
+  const hoy = new Date()
+  const hoyIso = hoy.toISOString().slice(0, 10)
+  if (preset === '7d') return { desde: addDays(hoyIso, -7), hasta: hoyIso }
+  if (preset === '15d') return { desde: addDays(hoyIso, -15), hasta: hoyIso }
+  if (preset === 'mes') return { desde: startOfMonth(hoy), hasta: endOfMonth(hoy) }
+  if (preset === 'mes_anterior') {
+    const mesAnt = new Date(hoy.getFullYear(), hoy.getMonth() - 1, 1)
+    return { desde: startOfMonth(mesAnt), hasta: endOfMonth(mesAnt) }
+  }
+  return { desde: addDays(hoyIso, -15), hasta: hoyIso }
+}
+
+// ---------------------------------------------------------------------------
+// LÓGICA CENTRAL DE CÁLCULO
+// (misma lógica que la versión React — ver README para el detalle de cada
+// decisión de negocio)
+// ---------------------------------------------------------------------------
+
+function aKg(cantidad, unidad, kgPorUnidad) {
+  if (unidad === 'kg') return cantidad
+  return cantidad * kgPorUnidad
+}
+
+function calcularStockEsperado(stockBase, comprasKg, descartesKg) {
+  return redondear(stockBase + comprasKg - (descartesKg || 0))
+}
+
+function calcularDiferencia(stockFisicoKg, stockEsperadoKg) {
+  return redondear(stockFisicoKg - stockEsperadoKg)
+}
+
+function calcularConsumoPeriodo(stockInicialPeriodoKg, comprasPeriodoKg, stockFisicoFinalKg) {
+  return redondear(stockInicialPeriodoKg + comprasPeriodoKg - stockFisicoFinalKg)
+}
+
+function calcularConsumoProductivo(consumoTotalKg, descartesPeriodoKg) {
+  return redondear(consumoTotalKg - descartesPeriodoKg)
+}
+
+function calcularPorcentajeMerma(descartesKg, consumoTotalKg) {
+  if (consumoTotalKg <= 0) return 0
+  return redondear((descartesKg / consumoTotalKg) * 100, 2)
+}
+
+function calcularCostoPromedioKg(lineas) {
+  const validas = lineas.filter((l) => l.costoTotal !== null && l.cantidadKg > 0)
+  if (validas.length === 0) return null
+  const kgTotales = validas.reduce((acc, l) => acc + l.cantidadKg, 0)
+  const costoTotal = validas.reduce((acc, l) => acc + (l.costoTotal || 0), 0)
+  if (kgTotales === 0) return null
+  return redondear(costoTotal / kgTotales, 2)
+}
+
+function bajoStockMinimo(stockActualKg, stockMinimoKg) { return stockActualKg < stockMinimoKg }
+function mermaExcedida(porcentajeMerma, porcentajeAceptable) { return porcentajeMerma > porcentajeAceptable }
+
+// ---------------------------------------------------------------------------
+// EXPORTAR CSV (sin dependencias)
+// ---------------------------------------------------------------------------
+
+function descargarCsv(nombreArchivo, columnas, filas) {
+  const escapar = (valor) => {
+    const texto = String(valor)
+    if (texto.includes(';') || texto.includes('"') || texto.includes('\n')) {
+      return `"${texto.replace(/"/g, '""')}"`
+    }
+    return texto
+  }
+  const lineas = [columnas.map(escapar).join(';'), ...filas.map((fila) => fila.map(escapar).join(';'))]
+  const contenido = '\uFEFF' + lineas.join('\r\n')
+  const blob = new Blob([contenido], { type: 'text/csv;charset=utf-8;' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = nombreArchivo.endsWith('.csv') ? nombreArchivo : `${nombreArchivo}.csv`
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+  URL.revokeObjectURL(url)
+}
+
+// ---------------------------------------------------------------------------
+// CONFIGURACIÓN DE SUPABASE (se guarda en localStorage, no hay .env porque
+// no hay paso de build)
+// ---------------------------------------------------------------------------
+
+const LS_CONFIG_KEY = 'molino_stock_supabase_config'
+
+function obtenerConfigGuardada() {
+  try {
+    const raw = localStorage.getItem(LS_CONFIG_KEY)
+    return raw ? JSON.parse(raw) : null
+  } catch {
+    return null
+  }
+}
+
+function guardarConfig(url, anonKey) {
+  localStorage.setItem(LS_CONFIG_KEY, JSON.stringify({ url, anonKey }))
+}
+
+function borrarConfig() {
+  localStorage.removeItem(LS_CONFIG_KEY)
+}
+
+let sb = null
+
+function inicializarSupabase() {
+  const config = obtenerConfigGuardada()
+  if (!config) return false
+  sb = window.supabase.createClient(config.url, config.anonKey)
+  return true
+}
+
+// ---------------------------------------------------------------------------
+// SESIÓN / AUTENTICACIÓN
+// ---------------------------------------------------------------------------
+
+let sesionActual = null // objeto session de Supabase Auth, o null
+
+function usuarioActual() {
+  return sesionActual?.user?.email ?? 'usuario'
+}
+
+async function cargarSesion() {
+  const { data } = await sb.auth.getSession()
+  sesionActual = data.session
+  sb.auth.onAuthStateChange((_evento, nuevaSesion) => {
+    sesionActual = nuevaSesion
+    renderApp()
+  })
+}
+
+async function iniciarSesion(email, password) {
+  const { error } = await sb.auth.signInWithPassword({ email, password })
+  if (error) {
+    if (error.message.includes('Invalid login credentials')) {
+      return { error: 'Usuario o contraseña incorrectos.' }
+    }
+    return { error: error.message }
+  }
+  return { error: null }
+}
+
+async function cerrarSesion() {
+  await sb.auth.signOut()
+}
+
+// ---------------------------------------------------------------------------
+// HISTORIAL GENERAL / AUDITORÍA
+// ---------------------------------------------------------------------------
+
+async function registrarAuditoria(entidad, entidadId, accion, detalle) {
+  try {
+    await sb.from('audit_log').insert({
+      entidad, entidad_id: entidadId, accion, detalle: detalle || '',
+      usuario_nombre: usuarioActual(),
+    })
+  } catch (e) {
+    console.warn('[auditLog] no se pudo registrar:', e)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// SERVICIOS: MOLINOS
+// ---------------------------------------------------------------------------
+
+async function listarMolinos(soloActivos) {
+  let query = sb.from('molinos').select('*').order('nombre')
+  if (soloActivos) query = query.eq('activo', true)
+  const { data, error } = await query
+  if (error) throw error
+  return data
+}
+
+async function crearMolino(nombre) {
+  const { data, error } = await sb.from('molinos').insert({ nombre }).select().single()
+  if (error) throw error
+  await registrarAuditoria('molino', data.id, 'crear', `Molino creado: ${nombre}`)
+  return data
+}
+
+async function actualizarMolino(id, nombre) {
+  const { error } = await sb.from('molinos').update({ nombre, updated_at: new Date().toISOString() }).eq('id', id)
+  if (error) throw error
+  await registrarAuditoria('molino', id, 'editar', `Nombre actualizado a: ${nombre}`)
+}
+
+async function alternarActivoMolino(id, activo) {
+  const { error } = await sb.from('molinos').update({ activo, updated_at: new Date().toISOString() }).eq('id', id)
+  if (error) throw error
+  await registrarAuditoria('molino', id, activo ? 'activar' : 'desactivar', '')
+}
+
+// ---------------------------------------------------------------------------
+// SERVICIOS: PRODUCTOS
+// ---------------------------------------------------------------------------
+
+async function listarProductos(soloActivos) {
+  let query = sb.from('productos').select('*, molinos(nombre)').order('nombre')
+  if (soloActivos) query = query.eq('activo', true)
+  const { data, error } = await query
+  if (error) throw error
+  return data.map((p) => ({ ...p, molino_nombre: p.molinos?.nombre ?? '—' }))
+}
+
+async function crearProducto(input) {
+  const { data, error } = await sb.from('productos').insert(input).select().single()
+  if (error) throw error
+  await registrarAuditoria('producto', data.id, 'crear', `Producto creado: ${input.nombre}`)
+  return data
+}
+
+async function actualizarProducto(id, input) {
+  const { error } = await sb.from('productos').update({ ...input, updated_at: new Date().toISOString() }).eq('id', id)
+  if (error) throw error
+  await registrarAuditoria('producto', id, 'editar', 'Datos del producto actualizados')
+}
+
+async function alternarActivoProducto(id, activo) {
+  const { error } = await sb.from('productos').update({ activo, updated_at: new Date().toISOString() }).eq('id', id)
+  if (error) throw error
+  await registrarAuditoria('producto', id, activo ? 'activar' : 'desactivar', '')
+}
+
+// ---------------------------------------------------------------------------
+// SERVICIOS: STOCK INICIAL Y STOCK ACTUAL
+// ---------------------------------------------------------------------------
+
+async function obtenerStockInicialVigente() {
+  const { data, error } = await sb.from('stock_inicial').select('*').eq('vigente', true)
+  if (error) throw error
+  const mapa = {}
+  for (const registro of data) mapa[registro.producto_id] = registro
+  return mapa
+}
+
+async function existeStockInicialCargado() {
+  const { count, error } = await sb
+    .from('stock_inicial')
+    .select('id', { count: 'exact', head: true })
+    .eq('vigente', true)
+  if (error) throw error
+  return (count || 0) > 0
+}
+
+async function guardarStockInicial(productoId, cantidadKg, fecha, motivoModificacion) {
+  const { data: vigente } = await sb
+    .from('stock_inicial')
+    .select('id')
+    .eq('producto_id', productoId)
+    .eq('vigente', true)
+    .maybeSingle()
+
+  if (vigente) {
+    const { error: errUpdate } = await sb.from('stock_inicial').update({ vigente: false }).eq('id', vigente.id)
+    if (errUpdate) throw errUpdate
+  }
+
+  const { error } = await sb.from('stock_inicial').insert({
+    producto_id: productoId,
+    cantidad_kg: cantidadKg,
+    fecha,
+    usuario_nombre: usuarioActual(),
+    vigente: true,
+    motivo_modificacion: motivoModificacion || null,
+  })
+  if (error) throw error
+
+  await registrarAuditoria(
+    'stock_inicial', productoId, vigente ? 'modificar' : 'cargar',
+    `Stock inicial: ${cantidadKg} kg${motivoModificacion ? ` — Motivo: ${motivoModificacion}` : ''}`
+  )
+}
+
+/**
+ * Stock actual estimado = base (último conteo físico vigente, o stock
+ * inicial si nunca se contó) + compras posteriores - descartes posteriores
+ * registrados. Mismo cálculo que "stock esperado" del próximo conteo.
+ */
+async function obtenerStockActual(productoId, baseStock) {
+  if (baseStock.origen === 'sin_datos') return 0
+
+  const { data: compras, error: errCompras } = await sb
+    .from('compra_items')
+    .select('cantidad_kg, compras!inner(fecha, estado)')
+    .eq('producto_id', productoId)
+    .gt('compras.fecha', baseStock.fecha)
+    .eq('compras.estado', 'activo')
+  if (errCompras) throw errCompras
+
+  const { data: descartes, error: errDescartes } = await sb
+    .from('descartes')
+    .select('cantidad_kg, fecha, estado')
+    .eq('producto_id', productoId)
+    .gt('fecha', baseStock.fecha)
+    .eq('estado', 'activo')
+  if (errDescartes) throw errDescartes
+
+  const comprasKg = (compras || []).reduce((acc, c) => acc + Number(c.cantidad_kg), 0)
+  const descartesKg = (descartes || []).reduce((acc, d) => acc + Number(d.cantidad_kg), 0)
+
+  return calcularStockEsperado(baseStock.cantidadKg, comprasKg, descartesKg)
+}
+
+// ---------------------------------------------------------------------------
+// SERVICIOS: COMPRAS
+// ---------------------------------------------------------------------------
+
+async function listarCompras(filtros) {
+  filtros = filtros || {}
+  let query = sb
+    .from('compras')
+    .select('*, molinos(nombre), compra_items(*, productos(nombre))')
+    .order('fecha', { ascending: false })
+
+  if (filtros.molinoId) query = query.eq('molino_id', filtros.molinoId)
+  if (filtros.desde) query = query.gte('fecha', filtros.desde)
+  if (filtros.hasta) query = query.lte('fecha', filtros.hasta)
+
+  const { data, error } = await query
+  if (error) throw error
+  let resultado = data
+  if (filtros.productoId) {
+    resultado = resultado.filter((c) => c.compra_items.some((i) => i.producto_id === filtros.productoId))
+  }
+  return resultado
+}
+
+async function crearCompra(input) {
+  const { data: compra, error: errCompra } = await sb
+    .from('compras')
+    .insert({
+      fecha: input.fecha,
+      molino_id: input.molino_id,
+      observaciones: input.observaciones || null,
+      usuario_nombre: usuarioActual(),
+      estado: 'activo',
+    })
+    .select()
+    .single()
+  if (errCompra) throw errCompra
+
+  const items = input.lineas.map((linea) => {
+    const cantidadKg = aKg(linea.cantidad, linea.unidad, linea.kg_por_unidad)
+    const costoTotal = linea.costo_unitario != null ? Number((linea.costo_unitario * linea.cantidad).toFixed(2)) : null
+    return {
+      compra_id: compra.id,
+      producto_id: linea.producto_id,
+      cantidad: linea.cantidad,
+      unidad: linea.unidad,
+      cantidad_kg: cantidadKg,
+      costo_unitario: linea.costo_unitario ?? null,
+      costo_total: costoTotal,
+    }
+  })
+
+  const { error: errItems } = await sb.from('compra_items').insert(items)
+  if (errItems) throw errItems
+
+  const totalKg = items.reduce((acc, i) => acc + i.cantidad_kg, 0)
+  await registrarAuditoria('compra', compra.id, 'crear', `Compra registrada: ${totalKg.toFixed(1)} kg en ${items.length} producto(s)`)
+
+  return compra
+}
+
+async function anularCompra(id, motivo) {
+  const { error } = await sb.from('compras').update({ estado: 'anulado', updated_at: new Date().toISOString() }).eq('id', id)
+  if (error) throw error
+  await registrarAuditoria('compra', id, 'anular', `Motivo: ${motivo}`)
+}
+
+// ---------------------------------------------------------------------------
+// SERVICIOS: CONTEOS FÍSICOS
+// ---------------------------------------------------------------------------
+
+/**
+ * Para cada producto activo determina su base (último conteo vigente o, si
+ * nunca se contó, el stock inicial), suma compras y descartes registrados
+ * desde esa base, y calcula el stock esperado — lo que se muestra ANTES de
+ * que la persona ingrese el stock físico.
+ */
+async function prepararNuevoConteo() {
+  const productos = await listarProductos(true)
+  const stockInicialVigente = await obtenerStockInicialVigente()
+
+  const { data: ultimosItems, error } = await sb
+    .from('conteo_items')
+    .select('producto_id, stock_fisico_kg, conteos!inner(fecha, estado)')
+    .eq('conteos.estado', 'activo')
+    .order('conteos(fecha)', { ascending: false })
+  if (error) throw error
+
+  const baseUltimoConteoPorProducto = {}
+  for (const item of ultimosItems || []) {
+    if (!baseUltimoConteoPorProducto[item.producto_id]) {
+      baseUltimoConteoPorProducto[item.producto_id] = {
+        cantidadKg: Number(item.stock_fisico_kg),
+        fecha: item.conteos.fecha,
+        origen: 'conteo',
+      }
+    }
+  }
+
+  const resultado = []
+  for (const producto of productos) {
+    const base = baseUltimoConteoPorProducto[producto.id] ||
+      (stockInicialVigente[producto.id]
+        ? { cantidadKg: Number(stockInicialVigente[producto.id].cantidad_kg), fecha: stockInicialVigente[producto.id].fecha, origen: 'stock_inicial' }
+        : { cantidadKg: 0, fecha: '1970-01-01', origen: 'sin_datos' })
+
+    const { data: compras } = await sb
+      .from('compra_items')
+      .select('cantidad_kg, compras!inner(fecha, estado)')
+      .eq('producto_id', producto.id)
+      .gt('compras.fecha', base.fecha)
+      .eq('compras.estado', 'activo')
+
+    const { data: descartes } = await sb
+      .from('descartes')
+      .select('cantidad_kg')
+      .eq('producto_id', producto.id)
+      .gt('fecha', base.fecha)
+      .eq('estado', 'activo')
+
+    const comprasKg = (compras || []).reduce((acc, c) => acc + Number(c.cantidad_kg), 0)
+    const descartesKg = (descartes || []).reduce((acc, d) => acc + Number(d.cantidad_kg), 0)
+
+    resultado.push({
+      producto, base, comprasPeriodoKg: comprasKg, descartesPeriodoKg: descartesKg,
+      stockEsperadoKg: calcularStockEsperado(base.cantidadKg, comprasKg, descartesKg),
+    })
+  }
+  return resultado
+}
+
+async function crearConteo(fecha, observaciones, items) {
+  const preparado = await prepararNuevoConteo()
+  const mapaPreparado = new Map(preparado.map((p) => [p.producto.id, p]))
+
+  const { data: ultimoConteo } = await sb
+    .from('conteos')
+    .select('fecha')
+    .eq('estado', 'activo')
+    .order('fecha', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+
+  const { data: conteo, error: errConteo } = await sb
+    .from('conteos')
+    .insert({
+      fecha,
+      periodo_inicio: ultimoConteo?.fecha ?? fecha,
+      observaciones: observaciones || null,
+      usuario_nombre: usuarioActual(),
+      estado: 'activo',
+    })
+    .select()
+    .single()
+  if (errConteo) throw errConteo
+
+  const filasItems = items.map((item) => {
+    const prep = mapaPreparado.get(item.producto_id)
+    const base = prep ? prep.base.cantidadKg : 0
+    const compras = prep ? prep.comprasPeriodoKg : 0
+    const stockEsperado = prep ? prep.stockEsperadoKg : 0
+    const consumoCalculado = calcularConsumoPeriodo(base, compras, item.stock_fisico_kg)
+    return {
+      conteo_id: conteo.id,
+      producto_id: item.producto_id,
+      stock_esperado_kg: stockEsperado,
+      stock_fisico_kg: item.stock_fisico_kg,
+      diferencia_kg: calcularDiferencia(item.stock_fisico_kg, stockEsperado),
+      consumo_calculado_kg: consumoCalculado,
+      motivo_diferencia_id: item.motivo_diferencia_id || null,
+      observacion_diferencia: item.observacion_diferencia || null,
+    }
+  })
+
+  const { error: errItems } = await sb.from('conteo_items').insert(filasItems)
+  if (errItems) throw errItems
+
+  await registrarAuditoria('conteo', conteo.id, 'crear', `Conteo realizado con ${filasItems.length} producto(s)`)
+  return conteo
+}
+
+async function listarConteos() {
+  const { data, error } = await sb
+    .from('conteos')
+    .select('*, conteo_items(*, productos(nombre, molino_id))')
+    .order('fecha', { ascending: false })
+  if (error) throw error
+  return data
+}
+
+async function anularConteo(id, motivo) {
+  const { error } = await sb.from('conteos').update({ estado: 'anulado', updated_at: new Date().toISOString() }).eq('id', id)
+  if (error) throw error
+  await registrarAuditoria('conteo', id, 'anular', `Motivo: ${motivo}`)
+}
+
+// ---------------------------------------------------------------------------
+// SERVICIOS: DESCARTES
+// ---------------------------------------------------------------------------
+
+async function listarDescartes(filtros) {
+  filtros = filtros || {}
+  let query = sb
+    .from('descartes')
+    .select('*, productos(nombre, molino_id), motivos_descarte(nombre)')
+    .order('fecha', { ascending: false })
+  if (filtros.productoId) query = query.eq('producto_id', filtros.productoId)
+  if (filtros.desde) query = query.gte('fecha', filtros.desde)
+  if (filtros.hasta) query = query.lte('fecha', filtros.hasta)
+
+  const { data, error } = await query
+  if (error) throw error
+  let resultado = data
+  if (filtros.molinoId) resultado = resultado.filter((d) => d.productos.molino_id === filtros.molinoId)
+  return resultado
+}
+
+async function crearDescarte(input) {
+  const cantidadKg = aKg(input.cantidad, input.unidad, input.kg_por_unidad)
+  const { data, error } = await sb
+    .from('descartes')
+    .insert({
+      fecha: input.fecha,
+      producto_id: input.producto_id,
+      cantidad: input.cantidad,
+      unidad: input.unidad,
+      cantidad_kg: cantidadKg,
+      motivo_id: input.motivo_id,
+      observaciones: input.observaciones || null,
+      usuario_nombre: usuarioActual(),
+      estado: 'activo',
+    })
+    .select()
+    .single()
+  if (error) throw error
+  await registrarAuditoria('descarte', data.id, 'crear', `Descarte registrado: ${cantidadKg.toFixed(1)} kg`)
+  return data
+}
+
+async function anularDescarte(id, motivo) {
+  const { error } = await sb.from('descartes').update({ estado: 'anulado' }).eq('id', id)
+  if (error) throw error
+  await registrarAuditoria('descarte', id, 'anular', `Motivo: ${motivo}`)
+}
+
+// ---------------------------------------------------------------------------
+// SERVICIOS: MOTIVOS
+// ---------------------------------------------------------------------------
+
+async function listarMotivosDescarte(soloActivos) {
+  let query = sb.from('motivos_descarte').select('*').order('nombre')
+  if (soloActivos) query = query.eq('activo', true)
+  const { data, error } = await query
+  if (error) throw error
+  return data
+}
+async function crearMotivoDescarte(nombre) {
+  const { error } = await sb.from('motivos_descarte').insert({ nombre })
+  if (error) throw error
+  await registrarAuditoria('motivo_descarte', 'nuevo', 'crear', nombre)
+}
+async function alternarActivoMotivoDescarte(id, activo) {
+  const { error } = await sb.from('motivos_descarte').update({ activo }).eq('id', id)
+  if (error) throw error
+}
+
+async function listarMotivosDiferencia(soloActivos) {
+  let query = sb.from('motivos_diferencia').select('*').order('nombre')
+  if (soloActivos) query = query.eq('activo', true)
+  const { data, error } = await query
+  if (error) throw error
+  return data
+}
+async function crearMotivoDiferencia(nombre) {
+  const { error } = await sb.from('motivos_diferencia').insert({ nombre })
+  if (error) throw error
+  await registrarAuditoria('motivo_diferencia', 'nuevo', 'crear', nombre)
+}
+async function alternarActivoMotivoDiferencia(id, activo) {
+  const { error } = await sb.from('motivos_diferencia').update({ activo }).eq('id', id)
+  if (error) throw error
+}
+
+// ---------------------------------------------------------------------------
+// SERVICIOS: CONFIGURACIÓN GENERAL
+// ---------------------------------------------------------------------------
+
+const CLAVES_CONFIG = {
+  UMBRAL_DIFERENCIA_KG: 'umbral_diferencia_kg',
+  UMBRAL_MERMA_PORCENTAJE: 'umbral_merma_porcentaje',
+  UMBRAL_AUMENTO_CONSUMO_PORCENTAJE: 'umbral_aumento_consumo_porcentaje',
+}
+
+async function obtenerConfiguracion() {
+  const { data, error } = await sb.from('configuracion').select('clave, valor')
+  if (error) throw error
+  const mapa = {}
+  for (const fila of data) mapa[fila.clave] = fila.valor
+  return mapa
+}
+
+async function actualizarConfiguracion(clave, valor) {
+  const { error } = await sb.from('configuracion').update({ valor, updated_at: new Date().toISOString() }).eq('clave', clave)
+  if (error) throw error
+}
+
+// ---------------------------------------------------------------------------
+// SERVICIO: AGREGACIONES PARA DASHBOARD Y REPORTES
+// ---------------------------------------------------------------------------
+
+async function obtenerResumen(filtros) {
+  const todosLosProductos = await listarProductos(true)
+  let productos = filtros.productoId ? todosLosProductos.filter((p) => p.id === filtros.productoId) : todosLosProductos
+  if (filtros.molinoId) productos = productos.filter((p) => p.molino_id === filtros.molinoId)
+
+  const stockInicialVigente = await obtenerStockInicialVigente()
+  const config = await obtenerConfiguracion()
+  const umbralMerma = Number(config[CLAVES_CONFIG.UMBRAL_MERMA_PORCENTAJE] || 5)
+
+  const resultado = []
+  for (const producto of productos) {
+    const stockIni = stockInicialVigente[producto.id]
+    const base = stockIni
+      ? { cantidadKg: Number(stockIni.cantidad_kg), fecha: stockIni.fecha, origen: 'stock_inicial' }
+      : { cantidadKg: 0, fecha: '1970-01-01', origen: 'sin_datos' }
+
+    const stockActualKg = await obtenerStockActual(producto.id, base)
+
+    const { data: compras } = await sb
+      .from('compra_items')
+      .select('cantidad_kg, compras!inner(fecha, molino_id, estado)')
+      .eq('producto_id', producto.id)
+      .eq('compras.estado', 'activo')
+      .gte('compras.fecha', filtros.desde)
+      .lte('compras.fecha', filtros.hasta)
+
+    const { data: conteoItems } = await sb
+      .from('conteo_items')
+      .select('consumo_calculado_kg, diferencia_kg, conteos!inner(fecha, estado)')
+      .eq('producto_id', producto.id)
+      .eq('conteos.estado', 'activo')
+      .gte('conteos.fecha', filtros.desde)
+      .lte('conteos.fecha', filtros.hasta)
+
+    const { data: descartes } = await sb
+      .from('descartes')
+      .select('cantidad_kg')
+      .eq('producto_id', producto.id)
+      .eq('estado', 'activo')
+      .gte('fecha', filtros.desde)
+      .lte('fecha', filtros.hasta)
+
+    const comprasKg = (compras || []).reduce((acc, c) => acc + Number(c.cantidad_kg), 0)
+    const consumoTotalKg = (conteoItems || []).reduce((acc, c) => acc + Number(c.consumo_calculado_kg), 0)
+    const diferenciaKg = (conteoItems || []).reduce((acc, c) => acc + Number(c.diferencia_kg), 0)
+    const descartesKg = (descartes || []).reduce((acc, d) => acc + Number(d.cantidad_kg), 0)
+    const mermaPorcentaje = calcularPorcentajeMerma(descartesKg, consumoTotalKg)
+
+    resultado.push({
+      producto, stockActualKg, comprasKg, consumoTotalKg, descartesKg, mermaPorcentaje, diferenciaKg,
+      bajoMinimo: bajoStockMinimo(stockActualKg, producto.stock_minimo),
+      mermaExcedida: mermaExcedida(mermaPorcentaje, producto.porcentaje_merma_aceptable || umbralMerma),
+    })
+  }
+  return resultado
+}
+
+async function obtenerEvolucionProducto(productoId) {
+  const { data, error } = await sb
+    .from('conteo_items')
+    .select('stock_fisico_kg, consumo_calculado_kg, diferencia_kg, conteos!inner(fecha, estado)')
+    .eq('producto_id', productoId)
+    .eq('conteos.estado', 'activo')
+    .order('conteos(fecha)', { ascending: true })
+  if (error) throw error
+  return data.map((d) => ({
+    fecha: d.conteos.fecha,
+    stockFisicoKg: Number(d.stock_fisico_kg),
+    consumoKg: Number(d.consumo_calculado_kg),
+    diferenciaKg: Number(d.diferencia_kg),
+  }))
+}
+
+async function faltaConfiguracionInicial() {
+  const productos = await listarProductos(true)
+  if (productos.length === 0) return false
+  const preparado = await prepararNuevoConteo()
+  return preparado.some((p) => p.base.origen === 'sin_datos')
+}
+
+// ---------------------------------------------------------------------------
+// ROUTER (hash-based, sin dependencias)
+// ---------------------------------------------------------------------------
+
+window.addEventListener('hashchange', renderApp)
+
+function rutaActual() {
+  const hash = location.hash.replace(/^#\/?/, '')
+  return hash || 'dashboard'
+}
+function irA(ruta) { location.hash = `#/${ruta}` }
+
+// ---------------------------------------------------------------------------
+// ICONOS (SVG inline, mismo trazo simple que la versión anterior)
+// ---------------------------------------------------------------------------
+
+const ICONOS = {
+  panel: '<svg viewBox="0 0 20 20" class="w-4 h-4 shrink-0" fill="none"><rect x="2.5" y="2.5" width="6.5" height="6.5" rx="1.2" stroke="currentColor" stroke-width="1.4"/><rect x="11" y="2.5" width="6.5" height="10" rx="1.2" stroke="currentColor" stroke-width="1.4"/><rect x="2.5" y="11" width="6.5" height="6.5" rx="1.2" stroke="currentColor" stroke-width="1.4"/><rect x="11" y="15" width="6.5" height="2.5" rx="1" stroke="currentColor" stroke-width="1.4"/></svg>',
+  compras: '<svg viewBox="0 0 20 20" class="w-4 h-4 shrink-0" fill="none"><path d="M4 6h12l-1 10H5L4 6Z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><path d="M7 6V5a3 3 0 0 1 6 0v1" stroke="currentColor" stroke-width="1.4"/></svg>',
+  conteo: '<svg viewBox="0 0 20 20" class="w-4 h-4 shrink-0" fill="none"><rect x="3" y="2.5" width="14" height="15" rx="1.5" stroke="currentColor" stroke-width="1.4"/><path d="M6.5 7.5h7M6.5 10.5h7M6.5 13.5h4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>',
+  descarte: '<svg viewBox="0 0 20 20" class="w-4 h-4 shrink-0" fill="none"><path d="M4 6h12M8 6V4.5a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1V6M5.5 6l.8 9.5a1.5 1.5 0 0 0 1.5 1.4h4.4a1.5 1.5 0 0 0 1.5-1.4L14.5 6" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  reportes: '<svg viewBox="0 0 20 20" class="w-4 h-4 shrink-0" fill="none"><path d="M3.5 16.5V9M9 16.5v-11M14.5 16.5V5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>',
+  admin: '<svg viewBox="0 0 20 20" class="w-4 h-4 shrink-0" fill="none"><circle cx="10" cy="10" r="2.6" stroke="currentColor" stroke-width="1.4"/><path d="M10 3.3v1.6M10 15.1v1.6M16.7 10h-1.6M4.9 10H3.3M14.7 5.3l-1.1 1.1M6.4 13.6l-1.1 1.1M14.7 14.7l-1.1-1.1M6.4 6.4 5.3 5.3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>',
+  wheat: '<svg viewBox="0 0 32 32" class="w-8 h-8 shrink-0" fill="none"><path d="M16 30V6" stroke="#C89B3C" stroke-width="1.6" stroke-linecap="round"/><g><path d="M16 7 C 12 4, 10 6, 8 9" stroke="#D9B24C" stroke-width="1.4" stroke-linecap="round"/><path d="M16 7 C 20 4, 22 6, 24 9" stroke="#D9B24C" stroke-width="1.4" stroke-linecap="round"/></g><g><path d="M16 11 C 12 8, 10 10, 8 13" stroke="#D9B24C" stroke-width="1.4" stroke-linecap="round"/><path d="M16 11 C 20 8, 22 10, 24 13" stroke="#D9B24C" stroke-width="1.4" stroke-linecap="round"/></g><g><path d="M16 15 C 12 12, 10 14, 8 17" stroke="#D9B24C" stroke-width="1.4" stroke-linecap="round"/><path d="M16 15 C 20 12, 22 14, 24 17" stroke="#D9B24C" stroke-width="1.4" stroke-linecap="round"/></g><g><path d="M16 19 C 12 16, 10 18, 8 21" stroke="#D9B24C" stroke-width="1.4" stroke-linecap="round"/><path d="M16 19 C 20 16, 22 18, 24 21" stroke="#D9B24C" stroke-width="1.4" stroke-linecap="round"/></g><circle cx="16" cy="5" r="2.4" fill="#C89B3C"/></svg>',
+}
+
+// ---------------------------------------------------------------------------
+// PANTALLA: CONFIGURAR SUPABASE (primera vez que se abre la app)
+// ---------------------------------------------------------------------------
+
+function renderConfig(root) {
+  root.innerHTML = `
+    <div class="min-h-screen flex items-center justify-center bg-flour-50 px-4">
+      <form id="form-config" class="card p-6 w-full max-w-md space-y-4">
+        <div class="text-center mb-2">
+          ${ICONOS.wheat}
+          <p class="font-display text-xl font-semibold text-crust-900 mt-2">Conectar con Supabase</p>
+          <p class="text-sm text-crust-600">Pegá los datos de tu proyecto (Project Settings → API)</p>
+        </div>
+        <div>
+          <label class="label">Project URL</label>
+          <input id="cfg-url" required class="input" placeholder="https://tu-proyecto.sb.co" />
+        </div>
+        <div>
+          <label class="label">Anon public key</label>
+          <input id="cfg-key" required class="input" placeholder="eyJhbGciOi..." />
+        </div>
+        <p id="cfg-error" class="text-sm text-rust-600 hidden"></p>
+        <button type="submit" class="btn-primary w-full">Conectar</button>
+        <p class="text-xs text-crust-500 text-center">
+          Estos datos quedan guardados solo en este navegador (localStorage). Nunca se suben a ningún lado.
+        </p>
+      </form>
+    </div>
+  `
+  qs('#form-config', root).addEventListener('submit', async (e) => {
+    e.preventDefault()
+    const url = qs('#cfg-url', root).value.trim()
+    const key = qs('#cfg-key', root).value.trim()
+    const errorEl = qs('#cfg-error', root)
+    if (!url || !key) return
+    guardarConfig(url, key)
+    inicializarSupabase()
+    try {
+      await cargarSesion()
+      renderApp()
+    } catch (err) {
+      borrarConfig()
+      errorEl.textContent = 'No se pudo conectar. Revisá la URL y la clave.'
+      errorEl.classList.remove('hidden')
+    }
+  })
+}
+
+// ---------------------------------------------------------------------------
+// PANTALLA: LOGIN
+// ---------------------------------------------------------------------------
+
+function renderLogin(root) {
+  root.innerHTML = `
+    <div class="min-h-screen flex items-center justify-center bg-flour-50 px-4">
+      <form id="form-login" class="card p-6 w-full max-w-sm space-y-4">
+        <div class="text-center mb-2">
+          <p class="font-display text-xl font-semibold text-crust-900">Molino &amp; Stock</p>
+          <p class="text-sm text-crust-600">Ingresá para gestionar el stock de harina</p>
+        </div>
+        <div>
+          <label class="label">Email</label>
+          <input type="email" id="login-email" required class="input" />
+        </div>
+        <div>
+          <label class="label">Contraseña</label>
+          <input type="password" id="login-password" required class="input" />
+        </div>
+        <p id="login-error" class="text-sm text-rust-600 hidden"></p>
+        <button type="submit" class="btn-primary w-full">Ingresar</button>
+        <p class="text-xs text-crust-500 text-center">
+          Los usuarios se crean desde el panel de Supabase (Authentication → Users). Ver README.
+        </p>
+        <button type="button" id="login-reconfigurar" class="text-xs text-crust-400 hover:underline w-full text-center">
+          Cambiar la conexión a Supabase
+        </button>
+      </form>
+    </div>
+  `
+  qs('#form-login', root).addEventListener('submit', async (e) => {
+    e.preventDefault()
+    const email = qs('#login-email', root).value.trim()
+    const password = qs('#login-password', root).value
+    const errorEl = qs('#login-error', root)
+    errorEl.classList.add('hidden')
+    const { error } = await iniciarSesion(email, password)
+    if (error) {
+      errorEl.textContent = error
+      errorEl.classList.remove('hidden')
+    } else {
+      renderApp()
+    }
+  })
+  qs('#login-reconfigurar', root).addEventListener('click', () => {
+    borrarConfig()
+    renderApp()
+  })
+}
+
+// ---------------------------------------------------------------------------
+// LAYOUT PRINCIPAL (sidebar + contenido)
+// ---------------------------------------------------------------------------
+
+const NAV = [
+  { ruta: 'dashboard', label: 'Panel', icono: ICONOS.panel },
+  { ruta: 'compras', label: 'Compras', icono: ICONOS.compras },
+  { ruta: 'conteos', label: 'Conteos', icono: ICONOS.conteo },
+  { ruta: 'descartes', label: 'Descartes', icono: ICONOS.descarte },
+  { ruta: 'reportes', label: 'Reportes', icono: ICONOS.reportes },
+  { ruta: 'administracion', label: 'Administración', icono: ICONOS.admin },
+]
+
+function layoutHtml(rutaBase, contenidoHtml) {
+  return `
+    <div class="min-h-screen flex flex-col md:flex-row">
+      <aside class="md:w-60 shrink-0 bg-crust-900 text-flour-100 flex md:flex-col md:min-h-screen no-imprimir">
+        <div class="flex items-center gap-2.5 px-5 py-5 border-b border-flour-100/10 md:border-b-0">
+          ${ICONOS.wheat}
+          <div class="leading-tight">
+            <p class="font-display font-semibold text-[15px] text-flour-50">Molino &amp; Stock</p>
+            <p class="text-[11px] text-flour-100/50 tracking-wide">control de harina</p>
+          </div>
+        </div>
+        <nav class="flex md:flex-col gap-1 px-2.5 py-2 overflow-x-auto md:overflow-visible">
+          ${NAV.map((item) => `
+            <a href="#/${item.ruta}" class="flex items-center gap-2.5 rounded-sack px-3 py-2.5 text-sm font-medium whitespace-nowrap transition-colors ${
+              rutaBase === item.ruta ? 'bg-wheat-500 text-crust-900 font-semibold' : 'text-flour-100/75 hover:bg-flour-100/10 hover:text-flour-50'
+            }">${item.icono}${escapeHtml(item.label)}</a>
+          `).join('')}
+        </nav>
+        <div class="hidden md:block mt-auto px-5 py-4 text-[11px] text-flour-100/40 space-y-1">
+          <p class="truncate">${escapeHtml(usuarioActual())}</p>
+          <button id="btn-cerrar-sesion" class="text-flour-100/60 hover:text-flour-50 hover:underline">Cerrar sesión</button>
+        </div>
+      </aside>
+      <main class="flex-1 min-w-0">
+        <div class="max-w-6xl mx-auto px-4 md:px-8 py-6 md:py-8" id="contenido">
+          ${contenidoHtml}
+        </div>
+      </main>
+    </div>
+  `
+}
+
+// ---------------------------------------------------------------------------
+// VISTA: DASHBOARD
+// ---------------------------------------------------------------------------
+
+const PRESETS_DASHBOARD = [
+  { value: '7d', label: 'Últimos 7 días' },
+  { value: '15d', label: 'Últimos 15 días' },
+  { value: 'mes', label: 'Este mes' },
+  { value: 'mes_anterior', label: 'Mes anterior' },
+]
+
+let estadoDashboard = { preset: '15d', molinoId: '' }
+
+async function renderDashboard(contenedor) {
+  contenedor.innerHTML = `<p class="text-sm text-crust-600">Cargando…</p>`
+
+  const [molinos, faltaInicial] = await Promise.all([listarMolinos(true), faltaConfiguracionInicial()])
+  const { desde, hasta } = calcularRango(estadoDashboard.preset)
+  const resumen = await obtenerResumen({ desde, hasta, molinoId: estadoDashboard.molinoId || undefined })
+
+  const totales = resumen.reduce((acc, r) => ({
+    stock: acc.stock + r.stockActualKg,
+    compras: acc.compras + r.comprasKg,
+    consumo: acc.consumo + r.consumoTotalKg,
+    descartes: acc.descartes + r.descartesKg,
+    diferencia: acc.diferencia + r.diferenciaKg,
+  }), { stock: 0, compras: 0, consumo: 0, descartes: 0, diferencia: 0 })
+  const mermaGlobal = totales.consumo > 0 ? (totales.descartes / totales.consumo) * 100 : 0
+  const alertas = resumen.filter((r) => r.bajoMinimo || r.mermaExcedida)
+
+  const molinosConDatos = Array.from(new Set(resumen.map((r) => r.producto.molino_nombre)))
+
+  contenedor.innerHTML = `
+    <div class="space-y-6">
+      <div class="flex flex-col md:flex-row md:items-end md:justify-between gap-4">
+        <div>
+          <h1 class="font-display text-2xl font-semibold text-crust-900">Panel general</h1>
+          <p class="text-sm text-crust-600 mt-1">Stock, compras, consumo y merma de harina.</p>
+        </div>
+        <div class="flex flex-wrap gap-2">
+          <a href="#/compras" class="btn-primary">+ Registrar compra</a>
+          <a href="#/conteos/nuevo" class="btn-secondary">+ Nuevo conteo</a>
+          <a href="#/descartes" class="btn-secondary">+ Registrar descarte</a>
+          <a href="#/reportes" class="btn-secondary">Ver reportes</a>
+        </div>
+      </div>
+
+      ${faltaInicial ? `
+        <div class="card p-4 bg-wheat-500/10 border-wheat-500/40 flex items-center justify-between gap-4 flex-wrap">
+          <p class="text-sm text-crust-800"><strong>Falta cargar el stock inicial</strong> de uno o más productos. Hasta que lo cargues, sus cálculos de stock y consumo no van a ser confiables.</p>
+          <a href="#/administracion/stock-inicial" class="btn-primary shrink-0">Configurar stock inicial</a>
+        </div>` : ''}
+
+      <div class="flex flex-wrap gap-2 items-center">
+        ${PRESETS_DASHBOARD.map((p) => `
+          <button data-preset="${p.value}" class="btn-preset ${estadoDashboard.preset === p.value ? 'btn-primary' : 'btn-secondary'} !py-1.5 !px-3 text-xs">${p.label}</button>
+        `).join('')}
+        <select id="dash-molino" class="input !w-auto text-xs py-1.5">
+          <option value="">Todos los molinos</option>
+          ${molinos.map((m) => `<option value="${m.id}" ${estadoDashboard.molinoId === m.id ? 'selected' : ''}>${escapeHtml(m.nombre)}</option>`).join('')}
+        </select>
+      </div>
+
+      ${alertas.length > 0 ? `
+        <div class="card p-4 border-l-4 border-rust-500/50 bg-rust-500/5">
+          <p class="text-sm font-semibold text-rust-600 mb-1.5">Alertas activas</p>
+          <ul class="text-sm text-crust-800 space-y-1">
+            ${alertas.map((a) => `
+              <li>
+                ${a.bajoMinimo ? `<span><strong>${escapeHtml(a.producto.nombre)}</strong> está bajo el stock mínimo (${a.stockActualKg.toFixed(0)} kg de ${a.producto.stock_minimo} kg). </span>` : ''}
+                ${a.mermaExcedida ? `<span><strong>${escapeHtml(a.producto.nombre)}</strong> tiene una merma de ${a.mermaPorcentaje.toFixed(1)}%, por encima del umbral aceptable.</span>` : ''}
+              </li>
+            `).join('')}
+          </ul>
+        </div>` : ''}
+
+      <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+        ${statCard('Stock actual', fmtKg(totales.stock), 'neutral')}
+        ${statCard('Compras', fmtKg(totales.compras), 'ok')}
+        ${statCard('Consumo', fmtKg(totales.consumo), 'neutral')}
+        ${statCard('Descartes', fmtKg(totales.descartes), totales.descartes > 0 ? 'warn' : 'neutral')}
+        ${statCard('Merma', `${mermaGlobal.toFixed(1)}%`, mermaGlobal > 5 ? 'danger' : 'ok')}
+        ${statCard('Diferencia inventario', `${totales.diferencia >= 0 ? '+' : ''}${totales.diferencia.toFixed(0)} kg`, Math.abs(totales.diferencia) > 10 ? 'warn' : 'neutral')}
+      </div>
+
+      <div>
+        <h2 class="font-display text-lg font-semibold text-crust-900 mb-3">Resumen por molino y producto</h2>
+        ${resumen.length === 0 ? emptyState('Todavía no hay datos para este período', 'Registrá una compra o hacé el primer conteo para empezar a ver indicadores acá.') : `
+          <div class="space-y-5">
+            ${molinosConDatos.map((nombreMolino) => `
+              <div class="card overflow-hidden">
+                <div class="px-4 py-3 border-b border-crust-800/10 bg-flour-100/60">
+                  <p class="font-display font-semibold text-crust-900">${escapeHtml(nombreMolino)}</p>
+                </div>
+                <table class="w-full table-clean">
+                  <thead><tr><th class="pl-4">Producto</th><th>Stock actual</th><th>Compras</th><th>Consumo</th><th>Descartes</th><th>Merma</th><th class="pr-4">Estado</th></tr></thead>
+                  <tbody>
+                    ${resumen.filter((r) => r.producto.molino_nombre === nombreMolino).map((r) => `
+                      <tr>
+                        <td class="pl-4"><a href="#/reportes/${r.producto.id}" class="font-medium text-crust-900 hover:underline">${escapeHtml(r.producto.nombre)}</a></td>
+                        <td>${fmtKg(r.stockActualKg)}</td>
+                        <td>${fmtKg(r.comprasKg)}</td>
+                        <td>${fmtKg(r.consumoTotalKg)}</td>
+                        <td>${fmtKg(r.descartesKg)}</td>
+                        <td>${r.mermaPorcentaje.toFixed(1)}%</td>
+                        <td class="pr-4">${r.bajoMinimo ? '<span class="badge-danger">Bajo mínimo</span>' : r.mermaExcedida ? '<span class="badge-warn">Merma alta</span>' : '<span class="badge-ok">OK</span>'}</td>
+                      </tr>
+                    `).join('')}
+                  </tbody>
+                </table>
+              </div>
+            `).join('')}
+          </div>
+        `}
+      </div>
+    </div>
+  `
+
+  qsa('.btn-preset', contenedor).forEach((btn) => {
+    btn.addEventListener('click', () => {
+      estadoDashboard.preset = btn.dataset.preset
+      renderDashboard(contenedor)
+    })
+  })
+  qs('#dash-molino', contenedor).addEventListener('change', (e) => {
+    estadoDashboard.molinoId = e.target.value
+    renderDashboard(contenedor)
+  })
+}
+
+function statCard(label, value, tone) {
+  const toneClass = { neutral: 'border-crust-800/10', ok: 'border-sage-500/30', warn: 'border-wheat-500/40', danger: 'border-rust-500/40' }[tone] || ''
+  return `
+    <div class="card p-4 border-l-4 ${toneClass}">
+      <p class="text-xs font-semibold uppercase tracking-wide text-crust-600">${escapeHtml(label)}</p>
+      <p class="font-display text-2xl font-semibold text-crust-900 mt-1.5">${escapeHtml(value)}</p>
+    </div>
+  `
+}
+
+function emptyState(titulo, descripcion) {
+  return `
+    <div class="card p-10 text-center">
+      <p class="font-display text-lg font-semibold text-crust-800">${escapeHtml(titulo)}</p>
+      <p class="text-sm text-crust-600 mt-1.5 max-w-md mx-auto">${escapeHtml(descripcion)}</p>
+    </div>
+  `
+}
+
+// ---------------------------------------------------------------------------
+// VISTA: COMPRAS
+// ---------------------------------------------------------------------------
+
+let estadoCompras = { filtroMolino: '', mostrarForm: false, lineas: [{ producto_id: '', cantidad: '', unidad: 'kg', costo_unitario: '' }] }
+
+async function renderCompras(contenedor) {
+  contenedor.innerHTML = `<p class="text-sm text-crust-600">Cargando…</p>`
+  const [molinos, productos, compras] = await Promise.all([
+    listarMolinos(true), listarProductos(true), listarCompras({ molinoId: estadoCompras.filtroMolino || undefined }),
+  ])
+
+  contenedor.innerHTML = `
+    <div class="space-y-6">
+      <div class="flex items-center justify-between flex-wrap gap-3">
+        <div>
+          <h1 class="font-display text-2xl font-semibold text-crust-900">Compras</h1>
+          <p class="text-sm text-crust-600 mt-1">Registrá cada entrada de harina por molino.</p>
+        </div>
+        <button id="btn-nueva-compra" class="btn-primary">+ Registrar compra</button>
+      </div>
+
+      <div id="form-compra-container"></div>
+
+      <div class="flex gap-2 items-center flex-wrap">
+        <select id="compras-filtro-molino" class="input !w-auto text-sm">
+          <option value="">Todos los molinos</option>
+          ${molinos.map((m) => `<option value="${m.id}" ${estadoCompras.filtroMolino === m.id ? 'selected' : ''}>${escapeHtml(m.nombre)}</option>`).join('')}
+        </select>
+        <button id="btn-csv-compras" class="btn-secondary text-sm" ${compras.length === 0 ? 'disabled' : ''}>Descargar CSV</button>
+      </div>
+
+      ${compras.length === 0 ? emptyState('Todavía no hay compras registradas', 'Usá el botón de arriba para cargar la primera.') : `
+        <div class="card overflow-x-auto">
+          <table class="w-full table-clean min-w-[720px]">
+            <thead><tr><th class="pl-4">Fecha</th><th>Molino</th><th>Productos</th><th>Kg totales</th><th>Costo</th><th class="pr-4">Estado</th></tr></thead>
+            <tbody>
+              ${compras.map((c) => {
+                const kgTotales = c.compra_items.reduce((a, i) => a + Number(i.cantidad_kg), 0)
+                const costoTotal = c.compra_items.reduce((a, i) => a + (i.costo_total || 0), 0)
+                return `
+                  <tr class="${c.estado === 'anulado' ? 'opacity-40' : ''}">
+                    <td class="pl-4">${fechaCorta(c.fecha)}</td>
+                    <td>${escapeHtml(c.molinos?.nombre || '')}</td>
+                    <td>${escapeHtml(c.compra_items.map((i) => i.productos.nombre).join(', '))}</td>
+                    <td>${fmtKg(kgTotales)}</td>
+                    <td>${costoTotal > 0 ? fmtMoney(costoTotal) : '—'}</td>
+                    <td class="pr-4">${c.estado === 'anulado' ? '<span class="badge-neutral">Anulada</span>' : `<button class="btn-anular-compra text-xs text-rust-600 hover:underline" data-id="${c.id}">Anular</button>`}</td>
+                  </tr>
+                `
+              }).join('')}
+            </tbody>
+          </table>
+        </div>
+      `}
+    </div>
+  `
+
+  if (estadoCompras.mostrarForm) renderFormCompra(contenedor, molinos, productos)
+
+  qs('#btn-nueva-compra', contenedor).addEventListener('click', () => {
+    estadoCompras.mostrarForm = true
+    estadoCompras.lineas = [{ producto_id: '', cantidad: '', unidad: 'kg', costo_unitario: '' }]
+    renderCompras(contenedor)
+  })
+  qs('#compras-filtro-molino', contenedor).addEventListener('change', (e) => {
+    estadoCompras.filtroMolino = e.target.value
+    renderCompras(contenedor)
+  })
+  qs('#btn-csv-compras', contenedor)?.addEventListener('click', () => {
+    descargarCsv('historial-compras',
+      ['Fecha', 'Molino', 'Productos', 'Kg totales', 'Costo', 'Estado', 'Observaciones'],
+      compras.map((c) => [
+        c.fecha, c.molinos?.nombre || '', c.compra_items.map((i) => i.productos.nombre).join(', '),
+        c.compra_items.reduce((a, i) => a + Number(i.cantidad_kg), 0).toFixed(1),
+        c.compra_items.reduce((a, i) => a + (i.costo_total || 0), 0).toFixed(0),
+        c.estado, c.observaciones || '',
+      ]))
+  })
+  qsa('.btn-anular-compra', contenedor).forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const motivo = window.prompt('Motivo de la anulación:')
+      if (motivo === null) return
+      await anularCompra(btn.dataset.id, motivo || 'Sin especificar')
+      renderCompras(contenedor)
+    })
+  })
+}
+
+function renderFormCompra(contenedor, molinos, productos) {
+  const cont = qs('#form-compra-container', contenedor)
+  const molinoId = estadoCompras.molinoId || molinos[0]?.id || ''
+  const productosDelMolino = productos.filter((p) => p.molino_id === molinoId)
+
+  cont.innerHTML = `
+    <div class="card p-5 space-y-4">
+      <p class="font-display font-semibold text-lg text-crust-900">Nueva compra</p>
+      <div class="grid md:grid-cols-3 gap-3">
+        <div><label class="label">Fecha</label><input type="date" id="fc-fecha" class="input" value="${hoyISO()}" /></div>
+        <div>
+          <label class="label">Molino</label>
+          <select id="fc-molino" class="input">
+            ${molinos.map((m) => `<option value="${m.id}" ${molinoId === m.id ? 'selected' : ''}>${escapeHtml(m.nombre)}</option>`).join('')}
+          </select>
+        </div>
+        <div><label class="label">Observaciones (opcional)</label><input id="fc-obs" class="input" /></div>
+      </div>
+      <div class="space-y-2">
+        <label class="label">Productos comprados</label>
+        <div id="fc-lineas"></div>
+        <button id="fc-agregar-linea" type="button" class="text-sm text-wheat-600 font-semibold hover:underline">+ Agregar producto</button>
+      </div>
+      <p id="fc-error" class="text-sm text-rust-600 hidden"></p>
+      <div class="flex gap-2 justify-end pt-2 border-t border-crust-800/10">
+        <button id="fc-cancelar" type="button" class="btn-secondary">Cancelar</button>
+        <button id="fc-guardar" type="button" class="btn-primary">Guardar compra</button>
+      </div>
+    </div>
+  `
+
+  function pintarLineas() {
+    const lineasEl = qs('#fc-lineas', cont)
+    const molinoSel = qs('#fc-molino', cont).value
+    const productosOpciones = productos.filter((p) => p.molino_id === molinoSel)
+    lineasEl.innerHTML = estadoCompras.lineas.map((linea, idx) => {
+      const producto = productosOpciones.find((p) => p.id === linea.producto_id)
+      const kg = producto && linea.cantidad ? Number(linea.cantidad) * producto.kg_por_unidad : null
+      return `
+        <div class="grid grid-cols-12 gap-2 items-center linea-compra" data-idx="${idx}">
+          <select class="input col-span-4 fc-producto">
+            <option value="">Producto…</option>
+            ${productosOpciones.map((p) => `<option value="${p.id}" ${linea.producto_id === p.id ? 'selected' : ''}>${escapeHtml(p.nombre)}</option>`).join('')}
+          </select>
+          <input type="number" min="0" placeholder="Cantidad" class="input col-span-2 fc-cantidad" value="${escapeHtml(linea.cantidad)}" />
+          <select class="input col-span-2 fc-unidad">
+            <option value="kg" ${linea.unidad === 'kg' ? 'selected' : ''}>kg</option>
+            <option value="bolsa" ${linea.unidad === 'bolsa' ? 'selected' : ''}>bolsa</option>
+            <option value="unidad" ${linea.unidad === 'unidad' ? 'selected' : ''}>unidad</option>
+          </select>
+          <input type="number" min="0" placeholder="Precio unit. (opc.)" class="input col-span-3 fc-costo" value="${escapeHtml(linea.costo_unitario)}" />
+          <button type="button" class="col-span-1 text-crust-400 hover:text-rust-600 text-sm fc-quitar">✕</button>
+          ${kg !== null ? `<p class="col-span-12 text-xs text-crust-500 -mt-1.5 ml-1">= ${kg.toFixed(1)} kg</p>` : ''}
+        </div>
+      `
+    }).join('')
+
+    qsa('.linea-compra', lineasEl).forEach((div) => {
+      const idx = Number(div.dataset.idx)
+      qs('.fc-producto', div).addEventListener('change', (e) => { estadoCompras.lineas[idx].producto_id = e.target.value; pintarLineas() })
+      qs('.fc-cantidad', div).addEventListener('input', (e) => { estadoCompras.lineas[idx].cantidad = e.target.value; pintarLineas() })
+      qs('.fc-unidad', div).addEventListener('change', (e) => { estadoCompras.lineas[idx].unidad = e.target.value })
+      qs('.fc-costo', div).addEventListener('input', (e) => { estadoCompras.lineas[idx].costo_unitario = e.target.value })
+      qs('.fc-quitar', div).addEventListener('click', () => {
+        estadoCompras.lineas = estadoCompras.lineas.filter((_, i) => i !== idx)
+        pintarLineas()
+      })
+    })
+  }
+  pintarLineas()
+
+  qs('#fc-molino', cont).addEventListener('change', () => {
+    estadoCompras.molinoId = qs('#fc-molino', cont).value
+    estadoCompras.lineas = [{ producto_id: '', cantidad: '', unidad: 'kg', costo_unitario: '' }]
+    pintarLineas()
+  })
+  qs('#fc-agregar-linea', cont).addEventListener('click', () => {
+    estadoCompras.lineas.push({ producto_id: '', cantidad: '', unidad: 'kg', costo_unitario: '' })
+    pintarLineas()
+  })
+  qs('#fc-cancelar', cont).addEventListener('click', () => {
+    estadoCompras.mostrarForm = false
+    renderCompras(contenedor)
+  })
+  qs('#fc-guardar', cont).addEventListener('click', async () => {
+    const errorEl = qs('#fc-error', cont)
+    errorEl.classList.add('hidden')
+    const fecha = qs('#fc-fecha', cont).value
+    const molino = qs('#fc-molino', cont).value
+    const observaciones = qs('#fc-obs', cont).value
+    const lineasValidas = estadoCompras.lineas.filter((l) => l.producto_id && Number(l.cantidad) > 0)
+
+    if (!molino) { errorEl.textContent = 'Elegí un molino.'; errorEl.classList.remove('hidden'); return }
+    if (lineasValidas.length === 0) { errorEl.textContent = 'Agregá al menos un producto con cantidad mayor a 0.'; errorEl.classList.remove('hidden'); return }
+
+    const btnGuardar = qs('#fc-guardar', cont)
+    btnGuardar.disabled = true
+    btnGuardar.textContent = 'Guardando…'
+    try {
+      await crearCompra({
+        fecha, molino_id: molino, observaciones,
+        lineas: lineasValidas.map((l) => {
+          const producto = productos.find((p) => p.id === l.producto_id)
+          return { producto_id: l.producto_id, cantidad: Number(l.cantidad), unidad: l.unidad, kg_por_unidad: producto.kg_por_unidad, costo_unitario: l.costo_unitario ? Number(l.costo_unitario) : null }
+        }),
+      })
+      estadoCompras.mostrarForm = false
+      renderCompras(contenedor)
+    } catch (err) {
+      console.error(err)
+      errorEl.textContent = 'No se pudo guardar la compra. Intentá de nuevo.'
+      errorEl.classList.remove('hidden')
+      btnGuardar.disabled = false
+      btnGuardar.textContent = 'Guardar compra'
+    }
+  })
+}
+
+// ---------------------------------------------------------------------------
+// VISTA: CONTEOS (historial)
+// ---------------------------------------------------------------------------
+
+let expandidoConteo = null
+
+async function renderConteos(contenedor) {
+  contenedor.innerHTML = `<p class="text-sm text-crust-600">Cargando…</p>`
+  const conteos = await listarConteos()
+
+  contenedor.innerHTML = `
+    <div class="space-y-6">
+      <div class="flex items-center justify-between flex-wrap gap-3">
+        <div>
+          <h1 class="font-display text-2xl font-semibold text-crust-900">Conteos físicos</h1>
+          <p class="text-sm text-crust-600 mt-1">Cada conteo cierra un período y calcula el consumo automáticamente.</p>
+        </div>
+        <div class="flex gap-2">
+          <button id="btn-csv-conteos" class="btn-secondary" ${conteos.length === 0 ? 'disabled' : ''}>Descargar CSV</button>
+          <a href="#/conteos/nuevo" class="btn-primary">+ Nuevo conteo</a>
+        </div>
+      </div>
+
+      ${conteos.length === 0 ? emptyState('Todavía no se hizo ningún conteo', 'El primer conteo va a usar el stock inicial como base. Hacé clic en «Nuevo conteo» para empezar.') : `
+        <div class="space-y-3">
+          ${conteos.map((c) => {
+            const totalConsumo = c.conteo_items.reduce((a, i) => a + Number(i.consumo_calculado_kg), 0)
+            const totalDiferencia = c.conteo_items.reduce((a, i) => a + Number(i.diferencia_kg), 0)
+            const expandido = expandidoConteo === c.id
+            return `
+              <div class="card ${c.estado === 'anulado' ? 'opacity-40' : ''}">
+                <button class="btn-toggle-conteo w-full flex items-center justify-between px-4 py-3.5 text-left" data-id="${c.id}">
+                  <div>
+                    <p class="font-medium text-crust-900">Conteo del ${fechaCorta(c.fecha)} <span class="text-crust-500 font-normal text-sm">(período desde ${fechaCorta(c.periodo_inicio)})</span></p>
+                    <p class="text-xs text-crust-600 mt-0.5">${c.conteo_items.length} producto(s) · Consumo total: ${fmtKg(totalConsumo)} · Diferencia: ${totalDiferencia >= 0 ? '+' : ''}${totalDiferencia.toFixed(0)} kg</p>
+                  </div>
+                  <span class="text-crust-400 text-sm">${expandido ? '▲' : '▼'}</span>
+                </button>
+                ${expandido ? `
+                  <div class="border-t border-crust-800/10 px-4 py-3 overflow-x-auto">
+                    <table class="w-full table-clean min-w-[600px]">
+                      <thead><tr><th>Producto</th><th>Esperado</th><th>Físico</th><th>Diferencia</th><th>Consumo</th></tr></thead>
+                      <tbody>
+                        ${c.conteo_items.map((i) => `
+                          <tr>
+                            <td>${escapeHtml(i.productos.nombre)}</td>
+                            <td>${fmtKg(i.stock_esperado_kg)}</td>
+                            <td>${fmtKg(i.stock_fisico_kg)}</td>
+                            <td class="${Number(i.diferencia_kg) < 0 ? 'text-rust-600' : 'text-sage-600'}">${Number(i.diferencia_kg) >= 0 ? '+' : ''}${Number(i.diferencia_kg).toFixed(0)} kg</td>
+                            <td>${fmtKg(i.consumo_calculado_kg)}</td>
+                          </tr>
+                        `).join('')}
+                      </tbody>
+                    </table>
+                    ${c.observaciones ? `<p class="text-xs text-crust-600 mt-2">Obs: ${escapeHtml(c.observaciones)}</p>` : ''}
+                    ${c.estado === 'activo' ? `<button class="btn-anular-conteo text-xs text-rust-600 hover:underline mt-3" data-id="${c.id}">Anular conteo</button>` : ''}
+                  </div>
+                ` : ''}
+              </div>
+            `
+          }).join('')}
+        </div>
+      `}
+    </div>
+  `
+
+  qsa('.btn-toggle-conteo', contenedor).forEach((btn) => {
+    btn.addEventListener('click', () => {
+      expandidoConteo = expandidoConteo === btn.dataset.id ? null : btn.dataset.id
+      renderConteos(contenedor)
+    })
+  })
+  qs('#btn-csv-conteos', contenedor)?.addEventListener('click', () => {
+    const filas = conteos.flatMap((c) => c.conteo_items.map((i) => [
+      c.fecha, c.periodo_inicio, i.productos.nombre,
+      Number(i.stock_esperado_kg).toFixed(1), Number(i.stock_fisico_kg).toFixed(1),
+      Number(i.diferencia_kg).toFixed(1), Number(i.consumo_calculado_kg).toFixed(1), c.estado,
+    ]))
+    descargarCsv('historial-conteos', ['Fecha conteo', 'Inicio período', 'Producto', 'Esperado (kg)', 'Físico (kg)', 'Diferencia (kg)', 'Consumo (kg)', 'Estado'], filas)
+  })
+  qsa('.btn-anular-conteo', contenedor).forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const motivo = window.prompt('Motivo de la anulación de este conteo:')
+      if (motivo === null) return
+      await anularConteo(btn.dataset.id, motivo || 'Sin especificar')
+      renderConteos(contenedor)
+    })
+  })
+}
+
+// ---------------------------------------------------------------------------
+// VISTA: NUEVO CONTEO
+// ---------------------------------------------------------------------------
+
+const UMBRAL_DIFERENCIA_PARA_PEDIR_MOTIVO_KG = 5
+
+let estadoNuevoConteo = null // se resetea cada vez que se entra a la vista
+
+async function renderNuevoConteo(contenedor) {
+  contenedor.innerHTML = `<p class="text-sm text-crust-600">Cargando productos…</p>`
+  const [items, motivos] = await Promise.all([prepararNuevoConteo(), listarMotivosDiferencia(true)])
+
+  estadoNuevoConteo = {
+    items, motivos,
+    valores: {}, motivoPorProducto: {}, obsPorProducto: {},
+    fecha: hoyISO(), observaciones: '', paso: 'carga',
+  }
+
+  if (items.length === 0) {
+    contenedor.innerHTML = emptyState('No hay productos activos para contar', 'Cargá al menos un producto activo desde Administración antes de hacer un conteo.')
+    return
+  }
+
+  pintarNuevoConteo(contenedor)
+}
+
+function pintarNuevoConteo(contenedor) {
+  const st = estadoNuevoConteo
+  const molinos = Array.from(new Set(st.items.map((i) => i.producto.molino_nombre)))
+  const faltanCampos = st.items.some((i) => !st.valores[i.producto.id])
+
+  if (st.paso === 'carga') {
+    contenedor.innerHTML = `
+      <div class="space-y-6 max-w-2xl">
+        <div>
+          <h1 class="font-display text-2xl font-semibold text-crust-900">Nuevo conteo</h1>
+          <p class="text-sm text-crust-600 mt-1">Ingresá solo el stock físico de cada producto. El sistema calcula el resto.</p>
+        </div>
+        <div class="card p-4">
+          <label class="label">Fecha del conteo</label>
+          <input type="date" id="nc-fecha" class="input max-w-[200px]" value="${st.fecha}" />
+        </div>
+        ${molinos.map((nombreMolino) => `
+          <div class="card overflow-hidden">
+            <div class="px-4 py-3 border-b border-crust-800/10 bg-flour-100/60"><p class="font-display font-semibold text-crust-900">${escapeHtml(nombreMolino)}</p></div>
+            <div class="divide-y divide-crust-800/10">
+              ${st.items.filter((i) => i.producto.molino_nombre === nombreMolino).map((i) => `
+                <div class="px-4 py-3.5 flex items-center justify-between gap-4">
+                  <div class="min-w-0">
+                    <p class="font-medium text-crust-900 truncate">${escapeHtml(i.producto.nombre)}</p>
+                    <p class="text-xs text-crust-500">Esperado: ${fmtKg(i.stockEsperadoKg)}</p>
+                  </div>
+                  <div class="flex items-center gap-2 shrink-0">
+                    <input type="number" inputmode="decimal" min="0" placeholder="kg" class="input w-28 text-lg text-right font-semibold py-3 nc-valor" data-id="${i.producto.id}" value="${st.valores[i.producto.id] || ''}" />
+                    <span class="text-sm text-crust-500">kg</span>
+                  </div>
+                </div>
+              `).join('')}
+            </div>
+          </div>
+        `).join('')}
+        <div class="card p-4">
+          <label class="label">Observaciones generales (opcional)</label>
+          <textarea id="nc-obs" class="input" rows="2">${escapeHtml(st.observaciones)}</textarea>
+        </div>
+        <p id="nc-error" class="text-sm text-rust-600 hidden"></p>
+        <div class="flex justify-end gap-2">
+          <a href="#/conteos" class="btn-secondary">Cancelar</a>
+          <button id="nc-continuar" class="btn-primary">Continuar</button>
+        </div>
+      </div>
+    `
+    qsa('.nc-valor', contenedor).forEach((input) => {
+      input.addEventListener('input', (e) => { st.valores[e.target.dataset.id] = e.target.value })
+    })
+    qs('#nc-fecha', contenedor).addEventListener('change', (e) => { st.fecha = e.target.value })
+    qs('#nc-obs', contenedor).addEventListener('input', (e) => { st.observaciones = e.target.value })
+    qs('#nc-continuar', contenedor).addEventListener('click', () => {
+      const errorEl = qs('#nc-error', contenedor)
+      if (st.items.some((i) => !st.valores[i.producto.id])) {
+        errorEl.textContent = 'Ingresá el stock físico de todos los productos antes de continuar.'
+        errorEl.classList.remove('hidden')
+        return
+      }
+      st.paso = 'resumen'
+      pintarNuevoConteo(contenedor)
+    })
+    return
+  }
+
+  // paso === 'resumen'
+  contenedor.innerHTML = `
+    <div class="space-y-6 max-w-2xl">
+      <div>
+        <h1 class="font-display text-2xl font-semibold text-crust-900">Confirmar conteo</h1>
+        <p class="text-sm text-crust-600 mt-1">Revisá las diferencias antes de guardar.</p>
+      </div>
+      <div class="card divide-y divide-crust-800/10">
+        ${st.items.map((i) => {
+          const fisico = Number(st.valores[i.producto.id])
+          const diferencia = calcularDiferencia(fisico, i.stockEsperadoKg)
+          const pideMotivo = Math.abs(diferencia) >= UMBRAL_DIFERENCIA_PARA_PEDIR_MOTIVO_KG
+          return `
+            <div class="px-4 py-3.5">
+              <div class="flex items-center justify-between">
+                <p class="font-medium text-crust-900">${escapeHtml(i.producto.nombre)}</p>
+                <span class="${diferencia < 0 ? 'badge-danger' : diferencia > 0 ? 'badge-warn' : 'badge-ok'}">${diferencia >= 0 ? '+' : ''}${diferencia.toFixed(0)} kg</span>
+              </div>
+              <p class="text-xs text-crust-500 mt-0.5">Esperado ${fmtKg(i.stockEsperadoKg)} · Físico ${fmtKg(fisico)}</p>
+              ${pideMotivo ? `
+                <div class="grid grid-cols-2 gap-2 mt-2">
+                  <select class="input text-xs py-1.5 nc-motivo" data-id="${i.producto.id}">
+                    <option value="">Motivo de la diferencia (opcional)</option>
+                    ${st.motivos.map((m) => `<option value="${m.id}" ${st.motivoPorProducto[i.producto.id] === m.id ? 'selected' : ''}>${escapeHtml(m.nombre)}</option>`).join('')}
+                  </select>
+                  <input class="input text-xs py-1.5 nc-obs-dif" data-id="${i.producto.id}" placeholder="Observación (opcional)" value="${escapeHtml(st.obsPorProducto[i.producto.id] || '')}" />
+                </div>
+              ` : ''}
+            </div>
+          `
+        }).join('')}
+      </div>
+      <p id="nc-error2" class="text-sm text-rust-600 hidden"></p>
+      <div class="flex justify-end gap-2">
+        <button id="nc-volver" class="btn-secondary">Volver</button>
+        <button id="nc-confirmar" class="btn-primary">Confirmar conteo</button>
+      </div>
+    </div>
+  `
+  qsa('.nc-motivo', contenedor).forEach((sel) => sel.addEventListener('change', (e) => { st.motivoPorProducto[e.target.dataset.id] = e.target.value }))
+  qsa('.nc-obs-dif', contenedor).forEach((inp) => inp.addEventListener('input', (e) => { st.obsPorProducto[e.target.dataset.id] = e.target.value }))
+  qs('#nc-volver', contenedor).addEventListener('click', () => { st.paso = 'carga'; pintarNuevoConteo(contenedor) })
+  qs('#nc-confirmar', contenedor).addEventListener('click', async () => {
+    const errorEl = qs('#nc-error2', contenedor)
+    const btn = qs('#nc-confirmar', contenedor)
+    btn.disabled = true
+    btn.textContent = 'Guardando…'
+    try {
+      const itemsInput = st.items.map((i) => ({
+        producto_id: i.producto.id,
+        stock_fisico_kg: Number(st.valores[i.producto.id]),
+        motivo_diferencia_id: st.motivoPorProducto[i.producto.id] || null,
+        observacion_diferencia: st.obsPorProducto[i.producto.id] || null,
+      }))
+      await crearConteo(st.fecha, st.observaciones || undefined, itemsInput)
+      irA('conteos')
+    } catch (err) {
+      console.error(err)
+      errorEl.textContent = 'No se pudo guardar el conteo. Intentá de nuevo.'
+      errorEl.classList.remove('hidden')
+      btn.disabled = false
+      btn.textContent = 'Confirmar conteo'
+    }
+  })
+}
+
+// ---------------------------------------------------------------------------
+// VISTA: DESCARTES
+// ---------------------------------------------------------------------------
+
+let estadoDescartes = { mostrarForm: false }
+
+async function renderDescartes(contenedor) {
+  contenedor.innerHTML = `<p class="text-sm text-crust-600">Cargando…</p>`
+  const [productos, motivos, descartes] = await Promise.all([listarProductos(true), listarMotivosDescarte(true), listarDescartes()])
+
+  contenedor.innerHTML = `
+    <div class="space-y-6">
+      <div class="flex items-center justify-between flex-wrap gap-3">
+        <div>
+          <h1 class="font-display text-2xl font-semibold text-crust-900">Descartes</h1>
+          <p class="text-sm text-crust-600 mt-1">Registrá la harina que se descarta a medida que ocurre. No hace falta esperar al conteo.</p>
+        </div>
+        <div class="flex gap-2">
+          <button id="btn-csv-descartes" class="btn-secondary" ${descartes.length === 0 ? 'disabled' : ''}>Descargar CSV</button>
+          <button id="btn-nuevo-descarte" class="btn-primary">+ Registrar descarte</button>
+        </div>
+      </div>
+
+      <div id="form-descarte-container"></div>
+
+      ${descartes.length === 0 ? emptyState('Todavía no hay descartes registrados', 'Usá el botón de arriba cuando ocurra uno.') : `
+        <div class="card overflow-x-auto">
+          <table class="w-full table-clean min-w-[640px]">
+            <thead><tr><th class="pl-4">Fecha</th><th>Producto</th><th>Cantidad</th><th>Motivo</th><th>Observaciones</th><th class="pr-4">Estado</th></tr></thead>
+            <tbody>
+              ${descartes.map((d) => `
+                <tr class="${d.estado === 'anulado' ? 'opacity-40' : ''}">
+                  <td class="pl-4">${fechaCorta(d.fecha)}</td>
+                  <td>${escapeHtml(d.productos.nombre)}</td>
+                  <td>${fmtKg1(d.cantidad_kg)}</td>
+                  <td>${escapeHtml(d.motivos_descarte.nombre)}</td>
+                  <td class="text-crust-600">${escapeHtml(d.observaciones || '—')}</td>
+                  <td class="pr-4">${d.estado === 'anulado' ? '<span class="badge-neutral">Anulado</span>' : `<button class="btn-anular-descarte text-xs text-rust-600 hover:underline" data-id="${d.id}">Anular</button>`}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+      `}
+    </div>
+  `
+
+  if (estadoDescartes.mostrarForm) renderFormDescarte(contenedor, productos, motivos)
+
+  qs('#btn-nuevo-descarte', contenedor).addEventListener('click', () => {
+    estadoDescartes.mostrarForm = true
+    renderDescartes(contenedor)
+  })
+  qs('#btn-csv-descartes', contenedor)?.addEventListener('click', () => {
+    descargarCsv('historial-descartes', ['Fecha', 'Producto', 'Cantidad (kg)', 'Motivo', 'Observaciones', 'Estado'],
+      descartes.map((d) => [d.fecha, d.productos.nombre, Number(d.cantidad_kg).toFixed(1), d.motivos_descarte.nombre, d.observaciones || '', d.estado]))
+  })
+  qsa('.btn-anular-descarte', contenedor).forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const motivo = window.prompt('Motivo de la anulación:')
+      if (motivo === null) return
+      await anularDescarte(btn.dataset.id, motivo || 'Sin especificar')
+      renderDescartes(contenedor)
+    })
+  })
+}
+
+function renderFormDescarte(contenedor, productos, motivos) {
+  const cont = qs('#form-descarte-container', contenedor)
+  cont.innerHTML = `
+    <div class="card p-5 space-y-4 max-w-xl">
+      <p class="font-display font-semibold text-lg text-crust-900">Registrar descarte</p>
+      <div class="grid md:grid-cols-2 gap-3">
+        <div><label class="label">Fecha</label><input type="date" id="fd-fecha" class="input" value="${hoyISO()}" /></div>
+        <div>
+          <label class="label">Producto</label>
+          <select id="fd-producto" class="input">
+            <option value="">Elegir…</option>
+            ${productos.map((p) => `<option value="${p.id}">${escapeHtml(p.molino_nombre)} — ${escapeHtml(p.nombre)}</option>`).join('')}
+          </select>
+        </div>
+        <div><label class="label">Cantidad</label><input type="number" min="0" id="fd-cantidad" class="input" /></div>
+        <div>
+          <label class="label">Unidad</label>
+          <select id="fd-unidad" class="input">
+            <option value="kg">kg</option><option value="bolsa">bolsa</option><option value="unidad">unidad</option>
+          </select>
+        </div>
+        <div class="md:col-span-2">
+          <label class="label">Motivo</label>
+          <select id="fd-motivo" class="input">
+            <option value="">Elegir…</option>
+            ${motivos.map((m) => `<option value="${m.id}">${escapeHtml(m.nombre)}</option>`).join('')}
+          </select>
+        </div>
+        <div class="md:col-span-2"><label class="label">Observaciones (opcional)</label><input id="fd-obs" class="input" /></div>
+      </div>
+      <p id="fd-error" class="text-sm text-rust-600 hidden"></p>
+      <div class="flex gap-2 justify-end pt-2 border-t border-crust-800/10">
+        <button id="fd-cancelar" type="button" class="btn-secondary">Cancelar</button>
+        <button id="fd-guardar" type="button" class="btn-primary">Guardar descarte</button>
+      </div>
+    </div>
+  `
+  qs('#fd-cancelar', cont).addEventListener('click', () => { estadoDescartes.mostrarForm = false; renderDescartes(contenedor) })
+  qs('#fd-guardar', cont).addEventListener('click', async () => {
+    const errorEl = qs('#fd-error', cont)
+    errorEl.classList.add('hidden')
+    const productoId = qs('#fd-producto', cont).value
+    const cantidad = qs('#fd-cantidad', cont).value
+    const unidad = qs('#fd-unidad', cont).value
+    const motivoId = qs('#fd-motivo', cont).value
+    const observaciones = qs('#fd-obs', cont).value
+    const producto = productos.find((p) => p.id === productoId)
+
+    if (!productoId || !motivoId || !(Number(cantidad) > 0)) {
+      errorEl.textContent = 'Completá producto, cantidad y motivo.'
+      errorEl.classList.remove('hidden')
+      return
+    }
+    const btn = qs('#fd-guardar', cont)
+    btn.disabled = true
+    btn.textContent = 'Guardando…'
+    try {
+      await crearDescarte({ fecha: qs('#fd-fecha', cont).value, producto_id: productoId, cantidad: Number(cantidad), unidad, kg_por_unidad: producto.kg_por_unidad, motivo_id: motivoId, observaciones })
+      estadoDescartes.mostrarForm = false
+      renderDescartes(contenedor)
+    } catch (err) {
+      console.error(err)
+      errorEl.textContent = 'No se pudo guardar. Intentá de nuevo.'
+      errorEl.classList.remove('hidden')
+      btn.disabled = false
+      btn.textContent = 'Guardar descarte'
+    }
+  })
+}
+
+// ---------------------------------------------------------------------------
+// VISTA: REPORTES
+// ---------------------------------------------------------------------------
+
+const PRESETS_REPORTES = [
+  { value: '15d', label: 'Últimos 15 días' },
+  { value: 'mes', label: 'Este mes' },
+  { value: 'mes_anterior', label: 'Mes anterior' },
+]
+
+let estadoReportes = { preset: 'mes', molinoId: '', productoId: '', rango: calcularRango('mes') }
+let chartsReportes = []
+
+function destruirCharts() {
+  chartsReportes.forEach((c) => c.destroy())
+  chartsReportes = []
+}
+
+async function renderReportes(contenedor) {
+  contenedor.innerHTML = `<p class="text-sm text-crust-600">Cargando…</p>`
+  const st = estadoReportes
+  const [molinos, productos] = await Promise.all([listarMolinos(true), listarProductos(true)])
+  const resumen = await obtenerResumen({ ...st.rango, molinoId: st.molinoId || undefined, productoId: st.productoId || undefined })
+
+  contenedor.innerHTML = `
+    <div class="space-y-6">
+      <div class="flex items-start justify-between flex-wrap gap-3">
+        <div>
+          <h1 class="font-display text-2xl font-semibold text-crust-900">Reportes</h1>
+          <p class="text-sm text-crust-600 mt-1">Del ${fechaCorta(st.rango.desde)} al ${fechaCorta(st.rango.hasta)}</p>
+        </div>
+        <div class="flex gap-2 no-imprimir">
+          <button id="rep-csv" class="btn-secondary" ${resumen.length === 0 ? 'disabled' : ''}>Descargar CSV (Excel)</button>
+          <button id="rep-pdf" class="btn-secondary" ${resumen.length === 0 ? 'disabled' : ''}>Descargar PDF</button>
+        </div>
+      </div>
+
+      <div class="flex flex-wrap gap-2 items-center no-imprimir">
+        ${PRESETS_REPORTES.map((p) => `<button data-preset="${p.value}" class="rep-preset ${st.preset === p.value ? 'btn-primary' : 'btn-secondary'} !py-1.5 !px-3 text-xs">${p.label}</button>`).join('')}
+        <div class="flex items-center gap-1.5 text-xs">
+          <input type="date" id="rep-desde" class="input !w-auto py-1.5" value="${st.rango.desde}" />
+          <span class="text-crust-500">–</span>
+          <input type="date" id="rep-hasta" class="input !w-auto py-1.5" value="${st.rango.hasta}" />
+        </div>
+        <select id="rep-molino" class="input !w-auto text-xs py-1.5">
+          <option value="">Todos los molinos</option>
+          ${molinos.map((m) => `<option value="${m.id}" ${st.molinoId === m.id ? 'selected' : ''}>${escapeHtml(m.nombre)}</option>`).join('')}
+        </select>
+        <select id="rep-producto" class="input !w-auto text-xs py-1.5">
+          <option value="">Todos los productos</option>
+          ${productos.map((p) => `<option value="${p.id}" ${st.productoId === p.id ? 'selected' : ''}>${escapeHtml(p.nombre)}</option>`).join('')}
+        </select>
+      </div>
+
+      <div class="grid md:grid-cols-2 gap-4">
+        <div class="card p-4"><p class="font-display font-semibold text-crust-900 mb-3">Compras vs. consumo</p><canvas id="chart-compras-consumo" height="220"></canvas></div>
+        <div class="card p-4"><p class="font-display font-semibold text-crust-900 mb-3">Merma por producto</p><canvas id="chart-merma" height="220"></canvas></div>
+      </div>
+
+      <div class="card overflow-x-auto">
+        <table class="w-full table-clean min-w-[760px]">
+          <thead><tr><th class="pl-4">Producto</th><th>Stock actual</th><th>Compras</th><th>Consumo</th><th>Descartes</th><th>Merma %</th><th>Diferencia</th><th class="pr-4 no-imprimir"></th></tr></thead>
+          <tbody>
+            ${resumen.map((r) => `
+              <tr>
+                <td class="pl-4 font-medium text-crust-900">${escapeHtml(r.producto.nombre)}</td>
+                <td>${fmtKg(r.stockActualKg)}</td>
+                <td>${fmtKg(r.comprasKg)}</td>
+                <td>${fmtKg(r.consumoTotalKg)}</td>
+                <td>${fmtKg(r.descartesKg)}</td>
+                <td>${r.mermaPorcentaje.toFixed(1)}%</td>
+                <td>${r.diferenciaKg >= 0 ? '+' : ''}${r.diferenciaKg.toFixed(0)} kg</td>
+                <td class="pr-4 no-imprimir"><a href="#/reportes/${r.producto.id}" class="text-xs text-wheat-600 font-semibold hover:underline">Ver detalle →</a></td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `
+
+  destruirCharts()
+  if (resumen.length > 0) {
+    const labels = resumen.map((r) => r.producto.nombre)
+    chartsReportes.push(new Chart(qs('#chart-compras-consumo', contenedor), {
+      type: 'bar',
+      data: { labels, datasets: [
+        { label: 'Compras', data: resumen.map((r) => Number(r.comprasKg.toFixed(0))), backgroundColor: '#6E8B5E' },
+        { label: 'Consumo', data: resumen.map((r) => Number(r.consumoTotalKg.toFixed(0))), backgroundColor: '#C89B3C' },
+      ] },
+      options: { responsive: true, plugins: { legend: { position: 'bottom' } } },
+    }))
+    chartsReportes.push(new Chart(qs('#chart-merma', contenedor), {
+      type: 'bar',
+      data: { labels, datasets: [{ label: 'Merma %', data: resumen.map((r) => Number(r.mermaPorcentaje.toFixed(1))), backgroundColor: '#B5563C' }] },
+      options: { responsive: true, plugins: { legend: { display: false } } },
+    }))
+  }
+
+  qsa('.rep-preset', contenedor).forEach((btn) => btn.addEventListener('click', () => {
+    st.preset = btn.dataset.preset
+    st.rango = calcularRango(st.preset)
+    renderReportes(contenedor)
+  }))
+  qs('#rep-desde', contenedor).addEventListener('change', (e) => { st.rango.desde = e.target.value; renderReportes(contenedor) })
+  qs('#rep-hasta', contenedor).addEventListener('change', (e) => { st.rango.hasta = e.target.value; renderReportes(contenedor) })
+  qs('#rep-molino', contenedor).addEventListener('change', (e) => { st.molinoId = e.target.value; renderReportes(contenedor) })
+  qs('#rep-producto', contenedor).addEventListener('change', (e) => { st.productoId = e.target.value; renderReportes(contenedor) })
+  qs('#rep-csv', contenedor)?.addEventListener('click', () => {
+    descargarCsv(`informe-harina_${st.rango.desde}_${st.rango.hasta}`,
+      ['Producto', 'Molino', 'Stock actual (kg)', 'Compras (kg)', 'Consumo (kg)', 'Descartes (kg)', 'Merma (%)', 'Diferencia (kg)'],
+      resumen.map((r) => [r.producto.nombre, r.producto.molino_nombre, r.stockActualKg.toFixed(1), r.comprasKg.toFixed(1), r.consumoTotalKg.toFixed(1), r.descartesKg.toFixed(1), r.mermaPorcentaje.toFixed(1), r.diferenciaKg.toFixed(1)]))
+  })
+  qs('#rep-pdf', contenedor)?.addEventListener('click', () => window.print())
+}
+
+// ---------------------------------------------------------------------------
+// VISTA: DETALLE DE PRODUCTO
+// ---------------------------------------------------------------------------
+
+async function renderProductoDetalle(contenedor, productoId) {
+  contenedor.innerHTML = `<p class="text-sm text-crust-600">Cargando…</p>`
+  const { desde, hasta } = calcularRango('mes')
+  const [productos, evolucion, resumenGeneral, compras] = await Promise.all([
+    listarProductos(true), obtenerEvolucionProducto(productoId), obtenerResumen({ desde, hasta }), listarCompras({ productoId }),
+  ])
+  const producto = productos.find((p) => p.id === productoId)
+  if (!producto) { contenedor.innerHTML = emptyState('Producto no encontrado', 'Puede que haya sido desactivado.'); return }
+  const resumen = resumenGeneral.find((r) => r.producto.id === productoId) || null
+  const lineas = compras.flatMap((c) => c.compra_items.filter((i) => i.producto_id === productoId).map((i) => ({ cantidadKg: Number(i.cantidad_kg), costoTotal: i.costo_total })))
+  const costoPromedio = calcularCostoPromedioKg(lineas)
+
+  contenedor.innerHTML = `
+    <div class="space-y-6">
+      <div>
+        <a href="#/reportes" class="text-sm text-wheat-600 font-semibold hover:underline">← Volver a reportes</a>
+        <h1 class="font-display text-2xl font-semibold text-crust-900 mt-2">${escapeHtml(producto.nombre)}</h1>
+        <p class="text-sm text-crust-600 mt-1">${escapeHtml(producto.molino_nombre)}</p>
+      </div>
+      ${resumen ? `
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+          ${statCard('Stock actual', fmtKg(resumen.stockActualKg), resumen.bajoMinimo ? 'danger' : 'neutral')}
+          ${statCard('Consumo (mes)', fmtKg(resumen.consumoTotalKg), 'neutral')}
+          ${statCard('Merma (mes)', `${resumen.mermaPorcentaje.toFixed(1)}%`, resumen.mermaExcedida ? 'danger' : 'ok')}
+          ${statCard('Costo promedio', costoPromedio ? `$${costoPromedio.toFixed(1)}/kg` : '— sin datos', 'neutral')}
+        </div>` : ''}
+      <div class="card p-4">
+        <p class="font-display font-semibold text-crust-900 mb-3">Evolución del stock físico</p>
+        ${evolucion.length === 0 ? '<p class="text-sm text-crust-600">Todavía no hay conteos registrados para este producto.</p>' : '<canvas id="chart-evolucion" height="220"></canvas>'}
+      </div>
+      ${evolucion.length > 0 ? `
+        <div class="card overflow-x-auto">
+          <table class="w-full table-clean">
+            <thead><tr><th class="pl-4">Fecha del conteo</th><th>Stock físico</th><th>Consumo del período</th><th class="pr-4">Diferencia</th></tr></thead>
+            <tbody>
+              ${[...evolucion].reverse().map((e) => `
+                <tr>
+                  <td class="pl-4">${fechaCorta(e.fecha)}</td>
+                  <td>${fmtKg(e.stockFisicoKg)}</td>
+                  <td>${fmtKg(e.consumoKg)}</td>
+                  <td class="pr-4">${e.diferenciaKg >= 0 ? '+' : ''}${e.diferenciaKg.toFixed(0)} kg</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+      ` : ''}
+    </div>
+  `
+
+  destruirCharts()
+  if (evolucion.length > 0) {
+    chartsReportes.push(new Chart(qs('#chart-evolucion', contenedor), {
+      type: 'line',
+      data: {
+        labels: evolucion.map((e) => fechaCorta(e.fecha)),
+        datasets: [
+          { label: 'Stock físico (kg)', data: evolucion.map((e) => e.stockFisicoKg), borderColor: '#C89B3C', backgroundColor: '#C89B3C', tension: 0.25 },
+          { label: 'Consumo del período (kg)', data: evolucion.map((e) => e.consumoKg), borderColor: '#5C4630', backgroundColor: '#5C4630', tension: 0.25 },
+        ],
+      },
+      options: { responsive: true, plugins: { legend: { position: 'bottom' } } },
+    }))
+  }
+}
+
+// ---------------------------------------------------------------------------
+// VISTA: ADMINISTRACIÓN
+// ---------------------------------------------------------------------------
+
+let estadoAdmin = { tab: 'Molinos' }
+const TABS_ADMIN = ['Molinos', 'Productos', 'Motivos', 'Configuración']
+
+async function renderAdministracion(contenedor) {
+  contenedor.innerHTML = `
+    <div class="space-y-6">
+      <div class="flex items-center justify-between flex-wrap gap-3">
+        <div>
+          <h1 class="font-display text-2xl font-semibold text-crust-900">Administración</h1>
+          <p class="text-sm text-crust-600 mt-1">Molinos, productos y parámetros del sistema. Nada acá queda fijo en el código.</p>
+        </div>
+        <a href="#/administracion/stock-inicial" class="btn-secondary">Configurar stock inicial</a>
+      </div>
+      <div class="flex gap-1.5 border-b border-crust-800/10">
+        ${TABS_ADMIN.map((t) => `<button data-tab="${t}" class="admin-tab px-3.5 py-2 text-sm font-semibold border-b-2 -mb-px transition-colors ${estadoAdmin.tab === t ? 'border-wheat-500 text-crust-900' : 'border-transparent text-crust-500 hover:text-crust-800'}">${t}</button>`).join('')}
+      </div>
+      <div id="admin-tab-content"></div>
+    </div>
+  `
+  qsa('.admin-tab', contenedor).forEach((btn) => btn.addEventListener('click', () => {
+    estadoAdmin.tab = btn.dataset.tab
+    renderAdministracion(contenedor)
+  }))
+
+  const tabContent = qs('#admin-tab-content', contenedor)
+  if (estadoAdmin.tab === 'Molinos') await renderTabMolinos(tabContent)
+  else if (estadoAdmin.tab === 'Productos') await renderTabProductos(tabContent)
+  else if (estadoAdmin.tab === 'Motivos') await renderTabMotivos(tabContent)
+  else await renderTabConfiguracion(tabContent)
+}
+
+async function renderTabMolinos(cont) {
+  cont.innerHTML = `<p class="text-sm text-crust-600">Cargando…</p>`
+  const molinos = await listarMolinos(false)
+  cont.innerHTML = `
+    <div class="space-y-4 max-w-xl">
+      <div class="card divide-y divide-crust-800/10">
+        ${molinos.map((m) => `
+          <div class="px-4 py-3 flex items-center justify-between gap-3">
+            <p class="font-medium ${m.activo ? 'text-crust-900' : 'text-crust-400 line-through'}">${escapeHtml(m.nombre)}</p>
+            <div class="flex items-center gap-2 shrink-0">
+              <button class="btn-editar-molino text-xs text-crust-500 hover:text-crust-800" data-id="${m.id}" data-nombre="${escapeHtml(m.nombre)}">Editar</button>
+              <button class="btn-toggle-molino text-xs ${m.activo ? 'text-rust-600' : 'text-sage-600'} hover:underline" data-id="${m.id}" data-activo="${m.activo}">${m.activo ? 'Desactivar' : 'Activar'}</button>
+            </div>
+          </div>
+        `).join('')}
+      </div>
+      <div class="flex gap-2">
+        <input id="nuevo-molino" class="input" placeholder="Nombre del nuevo molino" />
+        <button id="btn-crear-molino" class="btn-primary shrink-0">+ Crear molino</button>
+      </div>
+    </div>
+  `
+  qsa('.btn-editar-molino', cont).forEach((btn) => btn.addEventListener('click', async () => {
+    const nuevoNombre = window.prompt('Nuevo nombre del molino:', btn.dataset.nombre)
+    if (!nuevoNombre) return
+    await actualizarMolino(btn.dataset.id, nuevoNombre)
+    renderTabMolinos(cont)
+  }))
+  qsa('.btn-toggle-molino', cont).forEach((btn) => btn.addEventListener('click', async () => {
+    await alternarActivoMolino(btn.dataset.id, btn.dataset.activo !== 'true')
+    renderTabMolinos(cont)
+  }))
+  qs('#btn-crear-molino', cont).addEventListener('click', async () => {
+    const input = qs('#nuevo-molino', cont)
+    if (!input.value.trim()) return
+    await crearMolino(input.value.trim())
+    renderTabMolinos(cont)
+  })
+}
+
+async function renderTabProductos(cont) {
+  cont.innerHTML = `<p class="text-sm text-crust-600">Cargando…</p>`
+  const [productos, molinos] = await Promise.all([listarProductos(false), listarMolinos(true)])
+  cont.innerHTML = `
+    <div class="space-y-4">
+      <button id="btn-nuevo-producto" class="btn-primary">+ Crear producto</button>
+      <div id="form-producto-container"></div>
+      <div class="card overflow-x-auto">
+        <table class="w-full table-clean min-w-[760px]">
+          <thead><tr><th class="pl-4">Producto</th><th>Molino</th><th>Unidad</th><th>Kg/unidad</th><th>Stock mín.</th><th>Merma aceptable</th><th class="pr-4"></th></tr></thead>
+          <tbody>
+            ${productos.map((p) => `
+              <tr class="${!p.activo ? 'opacity-40' : ''}">
+                <td class="pl-4 font-medium text-crust-900">${escapeHtml(p.nombre)}</td>
+                <td>${escapeHtml(p.molino_nombre)}</td>
+                <td>${p.unidad}</td>
+                <td>${p.kg_por_unidad}</td>
+                <td>${p.stock_minimo} kg</td>
+                <td>${p.porcentaje_merma_aceptable}%</td>
+                <td class="pr-4 space-x-2 whitespace-nowrap">
+                  <button class="btn-editar-producto text-xs text-crust-500 hover:text-crust-800" data-id="${p.id}">Editar</button>
+                  <button class="btn-toggle-producto text-xs ${p.activo ? 'text-rust-600' : 'text-sage-600'} hover:underline" data-id="${p.id}" data-activo="${p.activo}">${p.activo ? 'Desactivar' : 'Activar'}</button>
+                </td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `
+  qs('#btn-nuevo-producto', cont).addEventListener('click', () => renderFormProducto(cont, molinos, productos, null))
+  qsa('.btn-editar-producto', cont).forEach((btn) => btn.addEventListener('click', () => {
+    const producto = productos.find((p) => p.id === btn.dataset.id)
+    renderFormProducto(cont, molinos, productos, producto)
+  }))
+  qsa('.btn-toggle-producto', cont).forEach((btn) => btn.addEventListener('click', async () => {
+    await alternarActivoProducto(btn.dataset.id, btn.dataset.activo !== 'true')
+    renderTabProductos(cont)
+  }))
+}
+
+function renderFormProducto(cont, molinos, productos, producto) {
+  const formCont = qs('#form-producto-container', cont)
+  const molinoId = producto?.molino_id || molinos[0]?.id || ''
+  formCont.innerHTML = `
+    <div class="card p-5 space-y-3 max-w-xl">
+      <p class="font-display font-semibold text-lg text-crust-900">${producto ? 'Editar producto' : 'Nuevo producto'}</p>
+      <div class="grid md:grid-cols-2 gap-3">
+        <div>
+          <label class="label">Molino</label>
+          <select id="fp-molino" class="input">${molinos.map((m) => `<option value="${m.id}" ${molinoId === m.id ? 'selected' : ''}>${escapeHtml(m.nombre)}</option>`).join('')}</select>
+        </div>
+        <div><label class="label">Nombre del producto</label><input id="fp-nombre" class="input" value="${escapeHtml(producto?.nombre || '')}" /></div>
+        <div>
+          <label class="label">Unidad de compra</label>
+          <select id="fp-unidad" class="input">
+            <option value="kg" ${producto?.unidad === 'kg' ? 'selected' : ''}>kg</option>
+            <option value="bolsa" ${!producto || producto.unidad === 'bolsa' ? 'selected' : ''}>bolsa</option>
+            <option value="unidad" ${producto?.unidad === 'unidad' ? 'selected' : ''}>unidad</option>
+          </select>
+        </div>
+        <div><label class="label">Kg por unidad</label><input type="number" min="0" id="fp-kg" class="input" value="${producto?.kg_por_unidad ?? 25}" /></div>
+        <div><label class="label">Stock mínimo (kg)</label><input type="number" min="0" id="fp-stock-min" class="input" value="${producto?.stock_minimo ?? 0}" /></div>
+        <div><label class="label">% de merma aceptable</label><input type="number" min="0" id="fp-merma" class="input" value="${producto?.porcentaje_merma_aceptable ?? 3}" /></div>
+      </div>
+      <p id="fp-error" class="text-sm text-rust-600 hidden"></p>
+      <div class="flex gap-2 justify-end pt-2 border-t border-crust-800/10">
+        <button id="fp-cancelar" type="button" class="btn-secondary">Cancelar</button>
+        <button id="fp-guardar" type="button" class="btn-primary">Guardar</button>
+      </div>
+    </div>
+  `
+  qs('#fp-cancelar', formCont).addEventListener('click', () => { formCont.innerHTML = '' })
+  qs('#fp-guardar', formCont).addEventListener('click', async () => {
+    const errorEl = qs('#fp-error', formCont)
+    const nombre = qs('#fp-nombre', formCont).value.trim()
+    const molino = qs('#fp-molino', formCont).value
+    if (!molino || !nombre) { errorEl.textContent = 'Completá molino y nombre.'; errorEl.classList.remove('hidden'); return }
+    const input = {
+      molino_id: molino, nombre, unidad: qs('#fp-unidad', formCont).value,
+      kg_por_unidad: Number(qs('#fp-kg', formCont).value) || 1,
+      stock_minimo: Number(qs('#fp-stock-min', formCont).value) || 0,
+      porcentaje_merma_aceptable: Number(qs('#fp-merma', formCont).value) || 0,
+    }
+    const btn = qs('#fp-guardar', formCont)
+    btn.disabled = true
+    try {
+      if (producto) await actualizarProducto(producto.id, input)
+      else await crearProducto(input)
+      renderTabProductos(cont)
+    } catch (err) {
+      console.error(err)
+      errorEl.textContent = 'No se pudo guardar.'
+      errorEl.classList.remove('hidden')
+      btn.disabled = false
+    }
+  })
+}
+
+async function renderTabMotivos(cont) {
+  cont.innerHTML = `<p class="text-sm text-crust-600">Cargando…</p>`
+  const [descarte, diferencia] = await Promise.all([listarMotivosDescarte(false), listarMotivosDiferencia(false)])
+  cont.innerHTML = `
+    <div class="grid md:grid-cols-2 gap-4">
+      <div class="space-y-3">
+        <p class="font-display font-semibold text-crust-900">Motivos de descarte</p>
+        <div class="card divide-y divide-crust-800/10">
+          ${descarte.map((m) => `
+            <div class="px-4 py-2.5 flex items-center justify-between">
+              <span class="${m.activo ? 'text-crust-900' : 'text-crust-400 line-through'}">${escapeHtml(m.nombre)}</span>
+              <button class="btn-toggle-md text-xs ${m.activo ? 'text-rust-600' : 'text-sage-600'} hover:underline" data-id="${m.id}" data-activo="${m.activo}">${m.activo ? 'Desactivar' : 'Activar'}</button>
+            </div>
+          `).join('')}
+        </div>
+        <div class="flex gap-2">
+          <input id="nuevo-motivo-descarte" class="input" placeholder="Nuevo motivo" />
+          <button id="btn-crear-md" class="btn-secondary shrink-0">+ Agregar</button>
+        </div>
+      </div>
+      <div class="space-y-3">
+        <p class="font-display font-semibold text-crust-900">Motivos de diferencia de inventario</p>
+        <div class="card divide-y divide-crust-800/10">
+          ${diferencia.map((m) => `
+            <div class="px-4 py-2.5 flex items-center justify-between">
+              <span class="${m.activo ? 'text-crust-900' : 'text-crust-400 line-through'}">${escapeHtml(m.nombre)}</span>
+              <button class="btn-toggle-mdif text-xs ${m.activo ? 'text-rust-600' : 'text-sage-600'} hover:underline" data-id="${m.id}" data-activo="${m.activo}">${m.activo ? 'Desactivar' : 'Activar'}</button>
+            </div>
+          `).join('')}
+        </div>
+        <div class="flex gap-2">
+          <input id="nuevo-motivo-dif" class="input" placeholder="Nuevo motivo" />
+          <button id="btn-crear-mdif" class="btn-secondary shrink-0">+ Agregar</button>
+        </div>
+      </div>
+    </div>
+  `
+  qsa('.btn-toggle-md', cont).forEach((btn) => btn.addEventListener('click', async () => {
+    await alternarActivoMotivoDescarte(btn.dataset.id, btn.dataset.activo !== 'true')
+    renderTabMotivos(cont)
+  }))
+  qsa('.btn-toggle-mdif', cont).forEach((btn) => btn.addEventListener('click', async () => {
+    await alternarActivoMotivoDiferencia(btn.dataset.id, btn.dataset.activo !== 'true')
+    renderTabMotivos(cont)
+  }))
+  qs('#btn-crear-md', cont).addEventListener('click', async () => {
+    const input = qs('#nuevo-motivo-descarte', cont)
+    if (!input.value.trim()) return
+    await crearMotivoDescarte(input.value.trim())
+    renderTabMotivos(cont)
+  })
+  qs('#btn-crear-mdif', cont).addEventListener('click', async () => {
+    const input = qs('#nuevo-motivo-dif', cont)
+    if (!input.value.trim()) return
+    await crearMotivoDiferencia(input.value.trim())
+    renderTabMotivos(cont)
+  })
+}
+
+async function renderTabConfiguracion(cont) {
+  cont.innerHTML = `<p class="text-sm text-crust-600">Cargando…</p>`
+  const config = await obtenerConfiguracion()
+  const campos = [
+    { clave: CLAVES_CONFIG.UMBRAL_DIFERENCIA_KG, label: 'Umbral general de diferencia de inventario (kg)' },
+    { clave: CLAVES_CONFIG.UMBRAL_MERMA_PORCENTAJE, label: 'Umbral general de merma (%)' },
+    { clave: CLAVES_CONFIG.UMBRAL_AUMENTO_CONSUMO_PORCENTAJE, label: 'Umbral de aumento de consumo vs. período anterior (%)' },
+  ]
+  cont.innerHTML = `
+    <div class="card p-5 max-w-lg space-y-4">
+      <p class="text-sm text-crust-600">Estos umbrales generales se usan cuando un producto no tiene su propio % de merma aceptable configurado.</p>
+      ${campos.map((c) => `
+        <div>
+          <label class="label">${c.label}</label>
+          <div class="flex gap-2">
+            <input type="number" class="input cfg-valor" data-clave="${c.clave}" value="${escapeHtml(config[c.clave] || '')}" />
+            <button class="btn-secondary shrink-0 text-xs btn-guardar-cfg" data-clave="${c.clave}">Guardar</button>
+          </div>
+        </div>
+      `).join('')}
+    </div>
+  `
+  qsa('.btn-guardar-cfg', cont).forEach((btn) => btn.addEventListener('click', async () => {
+    const input = qs(`.cfg-valor[data-clave="${btn.dataset.clave}"]`, cont)
+    btn.textContent = 'Guardando…'
+    await actualizarConfiguracion(btn.dataset.clave, input.value || '0')
+    btn.textContent = 'Guardar'
+  }))
+}
+
+// ---------------------------------------------------------------------------
+// VISTA: STOCK INICIAL
+// ---------------------------------------------------------------------------
+
+let estadoStockInicial = { fecha: hoyISO(), valores: {}, mensaje: '' }
+
+async function renderStockInicial(contenedor) {
+  contenedor.innerHTML = `<p class="text-sm text-crust-600">Cargando…</p>`
+  const [productos, vigente] = await Promise.all([listarProductos(true), obtenerStockInicialVigente()])
+  const molinos = Array.from(new Set(productos.map((p) => p.molino_nombre)))
+  const st = estadoStockInicial
+
+  contenedor.innerHTML = `
+    <div class="space-y-6 max-w-2xl">
+      <div>
+        <h1 class="font-display text-2xl font-semibold text-crust-900">Configuración de stock inicial</h1>
+        <p class="text-sm text-crust-600 mt-1">Se carga una única vez por producto. Es la base de todos los cálculos posteriores — para modificarlo después vas a tener que confirmarlo explícitamente.</p>
+      </div>
+      <div class="card p-4 max-w-[240px]">
+        <label class="label">Fecha del inventario inicial</label>
+        <input type="date" id="si-fecha" class="input" value="${st.fecha}" />
+      </div>
+      ${st.mensaje ? `<p class="text-sm text-sage-600">${escapeHtml(st.mensaje)}</p>` : ''}
+      ${molinos.map((nombreMolino) => `
+        <div class="card overflow-hidden">
+          <div class="px-4 py-3 border-b border-crust-800/10 bg-flour-100/60"><p class="font-display font-semibold text-crust-900">${escapeHtml(nombreMolino)}</p></div>
+          <div class="divide-y divide-crust-800/10">
+            ${productos.filter((p) => p.molino_nombre === nombreMolino).map((p) => `
+              <div class="px-4 py-3.5 flex items-center justify-between gap-4">
+                <div>
+                  <p class="font-medium text-crust-900">${escapeHtml(p.nombre)}</p>
+                  ${vigente[p.id] ? `<p class="text-xs text-crust-500">Actual: ${vigente[p.id].cantidad_kg} kg (desde ${vigente[p.id].fecha})</p>` : ''}
+                </div>
+                <div class="flex items-center gap-2 shrink-0">
+                  <input type="number" min="0" class="input w-28 si-valor" data-id="${p.id}" placeholder="kg" value="${vigente[p.id]?.cantidad_kg ?? ''}" />
+                  <button class="btn-secondary !py-2 !px-3 text-xs btn-guardar-si" data-id="${p.id}">Guardar</button>
+                </div>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      `).join('')}
+    </div>
+  `
+
+  qs('#si-fecha', contenedor).addEventListener('change', (e) => { st.fecha = e.target.value })
+  qsa('.si-valor', contenedor).forEach((input) => input.addEventListener('input', (e) => { st.valores[e.target.dataset.id] = e.target.value }))
+  qsa('.btn-guardar-si', contenedor).forEach((btn) => btn.addEventListener('click', async () => {
+    const productoId = btn.dataset.id
+    const producto = productos.find((p) => p.id === productoId)
+    const input = qs(`.si-valor[data-id="${productoId}"]`, contenedor)
+    const cantidad = Number(input.value)
+    if (!(cantidad >= 0)) return
+
+    const yaTeniaValor = Boolean(vigente[productoId])
+    if (yaTeniaValor) {
+      const confirmado = window.confirm(`${producto.nombre} ya tiene un stock inicial cargado (${vigente[productoId].cantidad_kg} kg). ¿Confirmás que querés modificarlo? Esto puede afectar todos los cálculos posteriores.`)
+      if (!confirmado) return
+    }
+    const motivo = yaTeniaValor ? (window.prompt('Motivo de la modificación:') || undefined) : undefined
+    btn.disabled = true
+    btn.textContent = 'Guardando…'
+    await guardarStockInicial(productoId, cantidad, st.fecha, motivo)
+    st.mensaje = `Stock inicial de ${producto.nombre} guardado.`
+    renderStockInicial(contenedor)
+  }))
+}
+
+// ---------------------------------------------------------------------------
+// APP: ORQUESTADOR PRINCIPAL
+// ---------------------------------------------------------------------------
+
+async function renderApp() {
+  const root = qs('#app')
+
+  if (!obtenerConfigGuardada()) {
+    renderConfig(root)
+    return
+  }
+  if (!sb) inicializarSupabase()
+  if (sesionActual === null) {
+    // Todavía no se resolvió la sesión (primera carga) o no hay usuario logueado.
+    const { data } = await sb.auth.getSession()
+    sesionActual = data.session
+    if (!sesionActual) {
+      renderLogin(root)
+      return
+    }
+  }
+
+  const [rutaBase, sub, subId] = rutaActual().split('/')
+  root.innerHTML = layoutHtml(rutaBase, '<p class="text-sm text-crust-600">Cargando…</p>')
+  qs('#btn-cerrar-sesion', root).addEventListener('click', async () => { await cerrarSesion() })
+
+  const contenido = qs('#contenido', root)
+  try {
+    if (rutaBase === 'dashboard') await renderDashboard(contenido)
+    else if (rutaBase === 'compras') await renderCompras(contenido)
+    else if (rutaBase === 'conteos' && sub === 'nuevo') await renderNuevoConteo(contenido)
+    else if (rutaBase === 'conteos') await renderConteos(contenido)
+    else if (rutaBase === 'descartes') await renderDescartes(contenido)
+    else if (rutaBase === 'reportes' && sub) await renderProductoDetalle(contenido, sub)
+    else if (rutaBase === 'reportes') await renderReportes(contenido)
+    else if (rutaBase === 'administracion' && sub === 'stock-inicial') await renderStockInicial(contenido)
+    else if (rutaBase === 'administracion') await renderAdministracion(contenido)
+    else await renderDashboard(contenido)
+  } catch (err) {
+    console.error(err)
+    contenido.innerHTML = `
+      <div class="card p-6 border-l-4 border-rust-500/50">
+        <p class="font-display font-semibold text-crust-900">Ocurrió un error al cargar esta pantalla</p>
+        <p class="text-sm text-crust-600 mt-1">Revisá la conexión a Supabase y las políticas de RLS. Detalle técnico: ${escapeHtml(err.message || String(err))}</p>
+      </div>
+    `
+  }
+}
+
+// Arranque
+document.addEventListener('DOMContentLoaded', () => {
+  if (inicializarSupabase()) {
+    cargarSesion().then(renderApp)
+  } else {
+    renderApp()
+  }
+})
+
+
+</script>
+</body>
+</html>
