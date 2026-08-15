@@ -117,7 +117,7 @@ function kgAUnidad(kg, producto) {
 function fmtUnidad(kg, producto) {
   if (!producto || producto.unidad === 'kg') return fmtKg(kg)
   const cantidad = kgAUnidad(kg, producto)
-  return `${cantidad.toFixed(1)} ${unidadPlural(producto.unidad)}`
+  return `${cantidad.toFixed(0)} ${unidadPlural(producto.unidad)}`
 }
 function unidadAKg(cantidadUnidad, producto) {
   if (!producto || producto.unidad === 'kg') return Number(cantidadUnidad || 0)
@@ -577,13 +577,14 @@ async function eliminarCompraDefinitivamente(compraId) {
 // ---------------------------------------------------------------------------
 
 /**
- * Para cada producto activo determina su base (último conteo vigente o, si
- * nunca se contó, el stock inicial), suma compras y descartes registrados
- * desde esa base, y calcula el stock esperado — lo que se muestra ANTES de
- * que la persona ingrese el stock físico.
+ * Determina, para cada producto, cuál es la base más reciente y confiable
+ * para proyectar el stock: el último conteo físico vigente si existe (es un
+ * dato confirmado), o si nunca se contó, el stock inicial. Esta es la ÚNICA
+ * función que decide esto — tanto para armar un conteo nuevo como para
+ * estimar el "stock estimado" del dashboard usan la misma base, para que
+ * nunca queden desincronizados entre sí.
  */
-async function prepararNuevoConteo() {
-  const productos = await listarProductos(true)
+async function obtenerBasesPorProducto() {
   const stockInicialVigente = await obtenerStockInicialVigente()
 
   const { data: ultimosItems, error } = await sb
@@ -604,12 +605,29 @@ async function prepararNuevoConteo() {
     }
   }
 
+  return { stockInicialVigente, baseUltimoConteoPorProducto }
+}
+
+function baseParaProducto(productoId, bases) {
+  return bases.baseUltimoConteoPorProducto[productoId] ||
+    (bases.stockInicialVigente[productoId]
+      ? { cantidadKg: Number(bases.stockInicialVigente[productoId].cantidad_kg), fecha: bases.stockInicialVigente[productoId].fecha, origen: 'stock_inicial' }
+      : { cantidadKg: 0, fecha: '1970-01-01', origen: 'sin_datos' })
+}
+
+/**
+ * Para cada producto activo determina su base (último conteo vigente o, si
+ * nunca se contó, el stock inicial), suma compras y descartes registrados
+ * desde esa base, y calcula el stock esperado — lo que se muestra ANTES de
+ * que la persona ingrese el stock físico.
+ */
+async function prepararNuevoConteo() {
+  const productos = await listarProductos(true)
+  const bases = await obtenerBasesPorProducto()
+
   const resultado = []
   for (const producto of productos) {
-    const base = baseUltimoConteoPorProducto[producto.id] ||
-      (stockInicialVigente[producto.id]
-        ? { cantidadKg: Number(stockInicialVigente[producto.id].cantidad_kg), fecha: stockInicialVigente[producto.id].fecha, origen: 'stock_inicial' }
-        : { cantidadKg: 0, fecha: '1970-01-01', origen: 'sin_datos' })
+    const base = baseParaProducto(producto.id, bases)
 
     const { data: compras } = await sb
       .from('compra_items')
@@ -820,16 +838,11 @@ async function obtenerResumen(filtros) {
   let productos = filtros.productoId ? todosLosProductos.filter((p) => p.id === filtros.productoId) : todosLosProductos
   if (filtros.molinoId) productos = productos.filter((p) => p.molino_id === filtros.molinoId)
 
-  const stockInicialVigente = await obtenerStockInicialVigente()
-  const config = await obtenerConfiguracion()
-  const umbralMerma = Number(config[CLAVES_CONFIG.UMBRAL_MERMA_PORCENTAJE] || 5)
+  const bases = await obtenerBasesPorProducto()
 
   const resultado = []
   for (const producto of productos) {
-    const stockIni = stockInicialVigente[producto.id]
-    const base = stockIni
-      ? { cantidadKg: Number(stockIni.cantidad_kg), fecha: stockIni.fecha, origen: 'stock_inicial' }
-      : { cantidadKg: 0, fecha: '1970-01-01', origen: 'sin_datos' }
+    const base = baseParaProducto(producto.id, bases)
 
     const stockActualKg = await obtenerStockActual(producto.id, base)
 
@@ -849,24 +862,13 @@ async function obtenerResumen(filtros) {
       .gte('conteos.fecha', filtros.desde)
       .lte('conteos.fecha', filtros.hasta)
 
-    const { data: descartes } = await sb
-      .from('descartes')
-      .select('cantidad_kg')
-      .eq('producto_id', producto.id)
-      .eq('estado', 'activo')
-      .gte('fecha', filtros.desde)
-      .lte('fecha', filtros.hasta)
-
     const comprasKg = (compras || []).reduce((acc, c) => acc + Number(c.cantidad_kg), 0)
     const consumoTotalKg = (conteoItems || []).reduce((acc, c) => acc + Number(c.consumo_calculado_kg), 0)
-    const diferenciaKg = (conteoItems || []).reduce((acc, c) => acc + Number(c.diferencia_kg), 0)
-    const descartesKg = (descartes || []).reduce((acc, d) => acc + Number(d.cantidad_kg), 0)
-    const mermaPorcentaje = calcularPorcentajeMerma(descartesKg, consumoTotalKg)
 
     resultado.push({
-      producto, stockActualKg, comprasKg, consumoTotalKg, descartesKg, mermaPorcentaje, diferenciaKg,
+      producto, stockActualKg, comprasKg, consumoTotalKg,
+      baseFecha: base.fecha, baseOrigen: base.origen,
       bajoMinimo: bajoStockMinimo(stockActualKg, producto.stock_minimo),
-      mermaExcedida: mermaExcedida(mermaPorcentaje, producto.porcentaje_merma_aceptable || umbralMerma),
     })
   }
   return resultado
@@ -1135,10 +1137,14 @@ async function renderDashboard(contenedor) {
         </div>` : ''}
 
       <div class="grid grid-cols-2 md:grid-cols-3 gap-3">
-        ${statCard(`Stock actual (al ${fechaHoy})`, `${totalStockBolsas.toFixed(1)} bolsas`, 'neutral')}
-        ${statCard('Compras del período', `${totalComprasBolsas.toFixed(1)} bolsas`, 'ok')}
-        ${statCard('Consumo del período', `${totalConsumoBolsas.toFixed(1)} bolsas`, 'neutral')}
+        ${statCard('Stock estimado (hoy)', `${totalStockBolsas.toFixed(0)} bolsas`, 'neutral')}
+        ${statCard('Compras del período', `${totalComprasBolsas.toFixed(0)} bolsas`, 'ok')}
+        ${statCard('Consumo del período', `${totalConsumoBolsas.toFixed(0)} bolsas`, 'neutral')}
       </div>
+      <p class="text-xs text-crust-500 -mt-3">
+        El stock estimado no es un dato confirmado: se calcula sumando las compras desde el último conteo físico de cada producto.
+        Solo el conteo te da el número real.
+      </p>
 
       <div>
         <h2 class="font-display text-lg font-semibold text-crust-900 mb-3">Resumen por molino y producto</h2>
@@ -1150,12 +1156,15 @@ async function renderDashboard(contenedor) {
                   <p class="font-display font-semibold text-crust-900">${escapeHtml(nombreMolino)}</p>
                 </div>
                 <table class="w-full table-clean">
-                  <thead><tr><th class="pl-4">Producto</th><th>Stock actual (al ${fechaHoy})</th><th>Compras</th><th>Consumo</th><th class="pr-4">Estado</th></tr></thead>
+                  <thead><tr><th class="pl-4">Producto</th><th>Stock estimado</th><th>Compras</th><th>Consumo</th><th class="pr-4">Estado</th></tr></thead>
                   <tbody>
                     ${resumen.filter((r) => r.producto.molino_nombre === nombreMolino).map((r) => `
                       <tr>
                         <td class="pl-4"><a href="#/reportes/${r.producto.id}" class="font-medium text-crust-900 hover:underline">${escapeHtml(r.producto.nombre)}</a></td>
-                        <td>${fmtUnidad(r.stockActualKg, r.producto)}</td>
+                        <td>
+                          ${fmtUnidad(r.stockActualKg, r.producto)}
+                          <p class="text-xs text-crust-400">${r.baseOrigen === 'conteo' ? `según conteo del ${fechaCorta(r.baseFecha)}` : r.baseOrigen === 'stock_inicial' ? `según stock inicial del ${fechaCorta(r.baseFecha)}` : 'sin stock inicial cargado'}</p>
+                        </td>
                         <td>${fmtUnidad(r.comprasKg, r.producto)}</td>
                         <td>${fmtUnidad(r.consumoTotalKg, r.producto)}</td>
                         <td class="pr-4">${r.bajoMinimo ? '<span class="badge-danger">Bajo mínimo</span>' : '<span class="badge-ok">OK</span>'}</td>
@@ -1370,7 +1379,7 @@ function renderFormCompra(contenedor, molinos, productos, compraEnEdicion) {
           </select>
           <input type="number" min="0" placeholder="Precio unit. (opc.)" class="input col-span-3 fc-costo" value="${escapeHtml(linea.costo_unitario)}" />
           <button type="button" class="col-span-1 text-crust-400 hover:text-rust-600 text-sm fc-quitar">✕</button>
-          ${kg !== null ? `<p class="col-span-12 text-xs text-crust-500 -mt-1.5 ml-1">= ${kg.toFixed(1)} kg</p>` : ''}
+          ${kg !== null ? `<p class="col-span-12 text-xs text-crust-500 -mt-1.5 ml-1">= ${kg.toFixed(0)} kg</p>` : ''}
         </div>
       `
     }).join('')
@@ -1860,12 +1869,15 @@ async function renderReportes(contenedor) {
 
       <div class="card overflow-x-auto">
         <table class="w-full table-clean min-w-[600px]">
-          <thead><tr><th class="pl-4">Producto</th><th>Stock actual (al ${fechaHoy})</th><th>Compras</th><th>Consumo</th><th class="pr-4 no-imprimir"></th></tr></thead>
+          <thead><tr><th class="pl-4">Producto</th><th>Stock estimado</th><th>Compras</th><th>Consumo</th><th class="pr-4 no-imprimir"></th></tr></thead>
           <tbody>
             ${resumen.map((r) => `
               <tr>
                 <td class="pl-4 font-medium text-crust-900">${escapeHtml(r.producto.nombre)}</td>
-                <td>${fmtUnidad(r.stockActualKg, r.producto)}</td>
+                <td>
+                  ${fmtUnidad(r.stockActualKg, r.producto)}
+                  <p class="text-xs text-crust-400">${r.baseOrigen === 'conteo' ? `según conteo del ${fechaCorta(r.baseFecha)}` : r.baseOrigen === 'stock_inicial' ? `según stock inicial del ${fechaCorta(r.baseFecha)}` : 'sin stock inicial cargado'}</p>
+                </td>
                 <td>${fmtUnidad(r.comprasKg, r.producto)}</td>
                 <td>${fmtUnidad(r.consumoTotalKg, r.producto)}</td>
                 <td class="pr-4 no-imprimir"><a href="#/reportes/${r.producto.id}" class="text-xs text-wheat-600 font-semibold hover:underline">Ver detalle →</a></td>
@@ -1883,8 +1895,8 @@ async function renderReportes(contenedor) {
     chartsReportes.push(new Chart(qs('#chart-compras-consumo', contenedor), {
       type: 'bar',
       data: { labels, datasets: [
-        { label: 'Compras', data: resumen.map((r) => Number(kgAUnidad(r.comprasKg, r.producto).toFixed(1))), backgroundColor: '#6E8B5E' },
-        { label: 'Consumo', data: resumen.map((r) => Number(kgAUnidad(r.consumoTotalKg, r.producto).toFixed(1))), backgroundColor: '#C89B3C' },
+        { label: 'Compras', data: resumen.map((r) => Number(kgAUnidad(r.comprasKg, r.producto).toFixed(0))), backgroundColor: '#6E8B5E' },
+        { label: 'Consumo', data: resumen.map((r) => Number(kgAUnidad(r.consumoTotalKg, r.producto).toFixed(0))), backgroundColor: '#C89B3C' },
       ] },
       options: { responsive: true, plugins: { legend: { position: 'bottom' } } },
     }))
@@ -1901,7 +1913,7 @@ async function renderReportes(contenedor) {
   qs('#rep-producto', contenedor).addEventListener('change', (e) => { st.productoId = e.target.value; renderReportes(contenedor) })
   qs('#rep-csv', contenedor)?.addEventListener('click', () => {
     descargarCsv(`informe-harina_${st.rango.desde}_${st.rango.hasta}`,
-      ['Producto', 'Molino', 'Stock actual', 'Compras', 'Consumo'],
+      ['Producto', 'Molino', 'Stock estimado', 'Compras', 'Consumo'],
       resumen.map((r) => [r.producto.nombre, r.producto.molino_nombre, fmtUnidad(r.stockActualKg, r.producto), fmtUnidad(r.comprasKg, r.producto), fmtUnidad(r.consumoTotalKg, r.producto)]))
   })
   qs('#rep-pdf', contenedor)?.addEventListener('click', () => window.print())
@@ -1933,10 +1945,13 @@ async function renderProductoDetalle(contenedor, productoId) {
       </div>
       ${resumen ? `
         <div class="grid grid-cols-2 md:grid-cols-3 gap-3">
-          ${statCard(`Stock actual (al ${fechaHoy})`, fmtUnidad(resumen.stockActualKg, producto), resumen.bajoMinimo ? 'danger' : 'neutral')}
+          ${statCard('Stock estimado', fmtUnidad(resumen.stockActualKg, producto), resumen.bajoMinimo ? 'danger' : 'neutral')}
           ${statCard('Consumo (mes)', fmtUnidad(resumen.consumoTotalKg, producto), 'neutral')}
           ${statCard('Costo promedio', costoPromedio ? `$${costoPromedio.toFixed(1)}/kg` : '— sin datos', 'neutral')}
-        </div>` : ''}
+        </div>
+        <p class="text-xs text-crust-500 -mt-3">
+          ${resumen.baseOrigen === 'conteo' ? `Estimado a partir del conteo del ${fechaCorta(resumen.baseFecha)} + compras desde entonces.` : resumen.baseOrigen === 'stock_inicial' ? `Estimado a partir del stock inicial del ${fechaCorta(resumen.baseFecha)} + compras desde entonces.` : 'Todavía no tiene stock inicial cargado.'}
+        </p>` : ''}
       <div class="card p-4">
         <p class="font-display font-semibold text-crust-900 mb-3">Evolución del stock físico</p>
         ${evolucion.length === 0 ? '<p class="text-sm text-crust-600">Todavía no hay conteos registrados para este producto.</p>' : '<canvas id="chart-evolucion" height="220"></canvas>'}
@@ -1967,8 +1982,8 @@ async function renderProductoDetalle(contenedor, productoId) {
       data: {
         labels: evolucion.map((e) => fechaCorta(e.fecha)),
         datasets: [
-          { label: `Stock físico (${unidadPlural(producto.unidad)})`, data: evolucion.map((e) => Number(kgAUnidad(e.stockFisicoKg, producto).toFixed(1))), borderColor: '#C89B3C', backgroundColor: '#C89B3C', tension: 0.25 },
-          { label: `Consumo del período (${unidadPlural(producto.unidad)})`, data: evolucion.map((e) => Number(kgAUnidad(e.consumoKg, producto).toFixed(1))), borderColor: '#5C4630', backgroundColor: '#5C4630', tension: 0.25 },
+          { label: `Stock físico (${unidadPlural(producto.unidad)})`, data: evolucion.map((e) => Number(kgAUnidad(e.stockFisicoKg, producto).toFixed(0))), borderColor: '#C89B3C', backgroundColor: '#C89B3C', tension: 0.25 },
+          { label: `Consumo del período (${unidadPlural(producto.unidad)})`, data: evolucion.map((e) => Number(kgAUnidad(e.consumoKg, producto).toFixed(0))), borderColor: '#5C4630', backgroundColor: '#5C4630', tension: 0.25 },
         ],
       },
       options: { responsive: true, plugins: { legend: { position: 'bottom' } } },
@@ -2111,7 +2126,7 @@ function renderFormProducto(cont, molinos, productos, producto) {
           </select>
         </div>
         <div><label class="label">Kg por unidad</label><input type="number" min="0" id="fp-kg" class="input" value="${producto?.kg_por_unidad ?? 25}" /></div>
-        <div><label class="label">Stock mínimo (bolsas)</label><input type="number" min="0" id="fp-stock-min" class="input" value="${producto ? (Number(producto.stock_minimo) / Number(producto.kg_por_unidad || 1)).toFixed(1) : 0}" /></div>
+        <div><label class="label">Stock mínimo (bolsas)</label><input type="number" min="0" id="fp-stock-min" class="input" value="${producto ? (Number(producto.stock_minimo) / Number(producto.kg_por_unidad || 1)).toFixed(0) : 0}" /></div>
       </div>
       <p id="fp-error" class="text-sm text-rust-600 hidden"></p>
       <div class="flex gap-2 justify-end pt-2 border-t border-crust-800/10">
@@ -2238,7 +2253,7 @@ async function renderTabConfiguracion(cont) {
 // VISTA: STOCK INICIAL
 // ---------------------------------------------------------------------------
 
-let estadoStockInicial = { fecha: hoyISO(), valores: {}, mensaje: '' }
+let estadoStockInicial = { valores: {}, fechas: {}, mensaje: '' }
 
 async function renderStockInicial(contenedor) {
   contenedor.innerHTML = `<p class="text-sm text-crust-600">Cargando…</p>`
@@ -2250,11 +2265,7 @@ async function renderStockInicial(contenedor) {
     <div class="space-y-6 max-w-2xl">
       <div>
         <h1 class="font-display text-2xl font-semibold text-crust-900">Configuración de stock inicial</h1>
-        <p class="text-sm text-crust-600 mt-1">Se carga una única vez por producto. Es la base de todos los cálculos posteriores — para modificarlo después vas a tener que confirmarlo explícitamente.</p>
-      </div>
-      <div class="card p-4 max-w-[240px]">
-        <label class="label">Fecha del inventario inicial</label>
-        <input type="date" id="si-fecha" class="input" value="${st.fecha}" />
+        <p class="text-sm text-crust-600 mt-1">Se carga una única vez por producto, con la fecha real en que se hizo ese inventario — no se resetea a hoy cada vez que volvés a esta pantalla.</p>
       </div>
       ${st.mensaje ? `<p class="text-sm text-sage-600">${escapeHtml(st.mensaje)}</p>` : ''}
       ${molinos.map((nombreMolino) => `
@@ -2262,13 +2273,14 @@ async function renderStockInicial(contenedor) {
           <div class="px-4 py-3 border-b border-crust-800/10 bg-flour-100/60"><p class="font-display font-semibold text-crust-900">${escapeHtml(nombreMolino)}</p></div>
           <div class="divide-y divide-crust-800/10">
             ${productos.filter((p) => p.molino_nombre === nombreMolino).map((p) => `
-              <div class="px-4 py-3.5 flex items-center justify-between gap-4">
+              <div class="px-4 py-3.5 flex items-center justify-between gap-3 flex-wrap">
                 <div>
                   <p class="font-medium text-crust-900">${escapeHtml(p.nombre)}</p>
-                  ${vigente[p.id] ? `<p class="text-xs text-crust-500">Actual: ${fmtUnidad(Number(vigente[p.id].cantidad_kg), p)} (desde ${fechaCorta(vigente[p.id].fecha)})</p>` : ''}
+                  ${vigente[p.id] ? `<p class="text-xs text-crust-500">Cargado: ${fmtUnidad(Number(vigente[p.id].cantidad_kg), p)} (fecha del inventario: ${fechaCorta(vigente[p.id].fecha)})</p>` : '<p class="text-xs text-crust-400">Sin cargar todavía</p>'}
                 </div>
                 <div class="flex items-center gap-2 shrink-0">
-                  <input type="number" min="0" class="input w-28 si-valor" data-id="${p.id}" placeholder="0" value="${vigente[p.id] ? kgAUnidad(Number(vigente[p.id].cantidad_kg), p).toFixed(1) : ''}" />
+                  <input type="date" class="input w-36 si-fecha" data-id="${p.id}" value="${st.fechas[p.id] || vigente[p.id]?.fecha || hoyISO()}" />
+                  <input type="number" min="0" class="input w-24 si-valor" data-id="${p.id}" placeholder="0" value="${vigente[p.id] ? kgAUnidad(Number(vigente[p.id].cantidad_kg), p).toFixed(0) : ''}" />
                   <span class="text-sm text-crust-500">${unidadPlural(p.unidad)}</span>
                   <button class="btn-secondary !py-2 !px-3 text-xs btn-guardar-si" data-id="${p.id}">Guardar</button>
                 </div>
@@ -2280,26 +2292,28 @@ async function renderStockInicial(contenedor) {
     </div>
   `
 
-  qs('#si-fecha', contenedor).addEventListener('change', (e) => { st.fecha = e.target.value })
+  qsa('.si-fecha', contenedor).forEach((input) => input.addEventListener('change', (e) => { st.fechas[e.target.dataset.id] = e.target.value }))
   qsa('.si-valor', contenedor).forEach((input) => input.addEventListener('input', (e) => { st.valores[e.target.dataset.id] = e.target.value }))
   qsa('.btn-guardar-si', contenedor).forEach((btn) => btn.addEventListener('click', async () => {
     const productoId = btn.dataset.id
     const producto = productos.find((p) => p.id === productoId)
-    const input = qs(`.si-valor[data-id="${productoId}"]`, contenedor)
-    const cantidadUnidad = Number(input.value)
+    const inputValor = qs(`.si-valor[data-id="${productoId}"]`, contenedor)
+    const inputFecha = qs(`.si-fecha[data-id="${productoId}"]`, contenedor)
+    const cantidadUnidad = Number(inputValor.value)
     if (!(cantidadUnidad >= 0)) return
     const cantidadKg = unidadAKg(cantidadUnidad, producto)
+    const fecha = inputFecha.value || hoyISO()
 
     const yaTeniaValor = Boolean(vigente[productoId])
     if (yaTeniaValor) {
-      const confirmado = window.confirm(`${producto.nombre} ya tiene un stock inicial cargado (${fmtUnidad(Number(vigente[productoId].cantidad_kg), producto)}). ¿Confirmás que querés modificarlo? Esto puede afectar todos los cálculos posteriores.`)
+      const confirmado = window.confirm(`${producto.nombre} ya tiene un stock inicial cargado (${fmtUnidad(Number(vigente[productoId].cantidad_kg), producto)}, del ${fechaCorta(vigente[productoId].fecha)}). ¿Confirmás que querés modificarlo? Esto puede afectar todos los cálculos posteriores.`)
       if (!confirmado) return
     }
     const motivo = yaTeniaValor ? (window.prompt('Motivo de la modificación:') || undefined) : undefined
     btn.disabled = true
     btn.textContent = 'Guardando…'
-    await guardarStockInicial(productoId, cantidadKg, st.fecha, motivo)
-    st.mensaje = `Stock inicial de ${producto.nombre} guardado.`
+    await guardarStockInicial(productoId, cantidadKg, fecha, motivo)
+    st.mensaje = `Stock inicial de ${producto.nombre} guardado (fecha: ${fechaCorta(fecha)}).`
     renderStockInicial(contenedor)
   }))
 }
