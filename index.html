@@ -591,7 +591,7 @@ async function obtenerBasesPorProducto() {
     .from('conteo_items')
     .select('producto_id, stock_fisico_kg, conteos!inner(fecha, estado)')
     .eq('conteos.estado', 'activo')
-    .order('conteos(fecha)', { ascending: false })
+    .order('fecha', { foreignTable: 'conteos', ascending: false })
   if (error) throw error
 
   const baseUltimoConteoPorProducto = {}
@@ -880,7 +880,7 @@ async function obtenerEvolucionProducto(productoId) {
     .select('stock_fisico_kg, consumo_calculado_kg, diferencia_kg, conteos!inner(fecha, estado)')
     .eq('producto_id', productoId)
     .eq('conteos.estado', 'activo')
-    .order('conteos(fecha)', { ascending: true })
+    .order('fecha', { foreignTable: 'conteos', ascending: true })
   if (error) throw error
   return data.map((d) => ({
     fecha: d.conteos.fecha,
@@ -1487,18 +1487,20 @@ async function renderConteos(contenedor) {
                 </button>
                 ${expandido ? `
                   <div class="border-t border-crust-800/10 px-4 py-3 overflow-x-auto">
-                    <table class="w-full table-clean min-w-[480px]">
-                      <thead><tr><th>Producto</th><th>Contado</th><th>Consumo</th></tr></thead>
+                    <table class="w-full table-clean min-w-[560px]">
+                      <thead><tr><th>Producto</th><th>Esperado</th><th>Contado</th><th>Consumo</th></tr></thead>
                       <tbody>
                         ${c.conteo_items.map((i) => `
                           <tr>
                             <td>${escapeHtml(i.productos.nombre)}</td>
+                            <td class="text-crust-500">${fmtUnidad(i.stock_esperado_kg, i.productos)}</td>
                             <td>${fmtUnidad(i.stock_fisico_kg, i.productos)}</td>
                             <td>${fmtUnidad(i.consumo_calculado_kg, i.productos)}</td>
                           </tr>
                         `).join('')}
                       </tbody>
                     </table>
+                    <p class="text-xs text-crust-400 mt-2">Esperado = stock base (último conteo o inicial) + compras desde entonces. Consumo = Esperado − Contado.</p>
                     ${c.observaciones ? `<p class="text-xs text-crust-600 mt-2">Obs: ${escapeHtml(c.observaciones)}</p>` : ''}
                     ${c.estado === 'activo' ? `<button class="btn-anular-conteo text-xs text-rust-600 hover:underline mt-3" data-id="${c.id}">Anular conteo</button>` : ''}
                   </div>
@@ -2257,7 +2259,7 @@ let estadoStockInicial = { valores: {}, fechas: {}, mensaje: '' }
 
 async function renderStockInicial(contenedor) {
   contenedor.innerHTML = `<p class="text-sm text-crust-600">Cargando…</p>`
-  const [productos, vigente] = await Promise.all([listarProductos(true), obtenerStockInicialVigente()])
+  const [productos, vigente, bases] = await Promise.all([listarProductos(true), obtenerStockInicialVigente(), obtenerBasesPorProducto()])
   const molinos = Array.from(new Set(productos.map((p) => p.molino_nombre)))
   const st = estadoStockInicial
 
@@ -2265,18 +2267,22 @@ async function renderStockInicial(contenedor) {
     <div class="space-y-6 max-w-2xl">
       <div>
         <h1 class="font-display text-2xl font-semibold text-crust-900">Configuración de stock inicial</h1>
-        <p class="text-sm text-crust-600 mt-1">Se carga una única vez por producto, con la fecha real en que se hizo ese inventario — no se resetea a hoy cada vez que volvés a esta pantalla.</p>
+        <p class="text-sm text-crust-600 mt-1">Se carga una única vez por producto, antes del primer conteo. Una vez que un producto ya tiene al menos un conteo hecho, para actualizar su stock usá <strong>"+ Nuevo conteo"</strong> — modificar el stock inicial acá ya no tiene efecto en los cálculos.</p>
       </div>
       ${st.mensaje ? `<p class="text-sm text-sage-600">${escapeHtml(st.mensaje)}</p>` : ''}
       ${molinos.map((nombreMolino) => `
         <div class="card overflow-hidden">
           <div class="px-4 py-3 border-b border-crust-800/10 bg-flour-100/60"><p class="font-display font-semibold text-crust-900">${escapeHtml(nombreMolino)}</p></div>
           <div class="divide-y divide-crust-800/10">
-            ${productos.filter((p) => p.molino_nombre === nombreMolino).map((p) => `
+            ${productos.filter((p) => p.molino_nombre === nombreMolino).map((p) => {
+              const base = baseParaProducto(p.id, bases)
+              const yaTieneConteo = base.origen === 'conteo'
+              return `
               <div class="px-4 py-3.5 flex items-center justify-between gap-3 flex-wrap">
                 <div>
                   <p class="font-medium text-crust-900">${escapeHtml(p.nombre)}</p>
                   ${vigente[p.id] ? `<p class="text-xs text-crust-500">Cargado: ${fmtUnidad(Number(vigente[p.id].cantidad_kg), p)} (fecha del inventario: ${fechaCorta(vigente[p.id].fecha)})</p>` : '<p class="text-xs text-crust-400">Sin cargar todavía</p>'}
+                  ${yaTieneConteo ? `<p class="text-xs text-wheat-600 font-medium mt-0.5">⚠ Ya tiene un conteo del ${fechaCorta(base.fecha)} — editar acá NO va a cambiar el stock estimado. Usá "+ Nuevo conteo".</p>` : ''}
                 </div>
                 <div class="flex items-center gap-2 shrink-0">
                   <input type="date" class="input w-36 si-fecha" data-id="${p.id}" value="${st.fechas[p.id] || vigente[p.id]?.fecha || hoyISO()}" />
@@ -2285,7 +2291,7 @@ async function renderStockInicial(contenedor) {
                   <button class="btn-secondary !py-2 !px-3 text-xs btn-guardar-si" data-id="${p.id}">Guardar</button>
                 </div>
               </div>
-            `).join('')}
+            `}).join('')}
           </div>
         </div>
       `).join('')}
@@ -2304,9 +2310,15 @@ async function renderStockInicial(contenedor) {
     const cantidadKg = unidadAKg(cantidadUnidad, producto)
     const fecha = inputFecha.value || hoyISO()
 
+    const base = baseParaProducto(productoId, bases)
+    if (base.origen === 'conteo') {
+      const seguir = window.confirm(`${producto.nombre} ya tiene un conteo real del ${fechaCorta(base.fecha)}. Guardar acá NO va a cambiar el stock estimado ni el consumo — para eso hace falta un nuevo conteo. ¿Guardar igual este valor histórico?`)
+      if (!seguir) return
+    }
+
     const yaTeniaValor = Boolean(vigente[productoId])
     if (yaTeniaValor) {
-      const confirmado = window.confirm(`${producto.nombre} ya tiene un stock inicial cargado (${fmtUnidad(Number(vigente[productoId].cantidad_kg), producto)}, del ${fechaCorta(vigente[productoId].fecha)}). ¿Confirmás que querés modificarlo? Esto puede afectar todos los cálculos posteriores.`)
+      const confirmado = window.confirm(`${producto.nombre} ya tiene un stock inicial cargado (${fmtUnidad(Number(vigente[productoId].cantidad_kg), producto)}, del ${fechaCorta(vigente[productoId].fecha)}). ¿Confirmás que querés modificarlo?`)
       if (!confirmado) return
     }
     const motivo = yaTeniaValor ? (window.prompt('Motivo de la modificación:') || undefined) : undefined
